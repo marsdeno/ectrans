@@ -43,6 +43,7 @@
 #define hipfftCreate cufftCreate
 #define hipfftDestroy cufftDestroy
 #define hipfftPlanMany cufftPlanMany
+#define hipfftMakePlanMany cufftMakePlanMany
 #define hipfftGetSize cufftGetSize
 #define hipfftSetAutoAllocation cufftSetAutoAllocation 
 #define hipfftSetStream cufftSetStream

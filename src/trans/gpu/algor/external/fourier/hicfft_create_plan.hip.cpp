@@ -43,23 +43,20 @@ hicfft_create_plan_(hipfftHandle * *plan, int *ISIGNp, int *Np, int *LOTp, int *
     // Disable auto allocation
     fftSafeCall(hipfftSetAutoAllocation(**plan, false));
 
+    size_t thisWorkplanSize;
     if( ISIGN== -1 ){
-      fftSafeCall(hipfftPlanMany(*plan, 1, &N,
+      fftSafeCall(hipfftMakePlanMany(**plan, 1, &N,
                     embed, stride, dist,
                     embed, stride, dist,
-                    fft_dir, LOT));
+                    fft_dir, LOT, &thisWorkplanSize));
     }  else if( ISIGN== 1){
-      fftSafeCall(hipfftPlanMany(*plan, 1, &N,
+      fftSafeCall(hipfftMakePlanMany(**plan, 1, &N,
                     embed, stride, dist,
                     embed, stride, dist,
-                    fft_inv, LOT));
+                    fft_inv, LOT, &thisWorkplanSize));
     } else {
       abort();
     }
-
-    // get size used by this plan
-    size_t thisWorkplanSize;
-    hipfftGetSize(**plan, &thisWorkplanSize);
 
     // check if this the work space is sufficiently large
     if (thisWorkplanSize > currentWorkspaceSize) {
