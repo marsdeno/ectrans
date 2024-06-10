@@ -13,6 +13,8 @@ cmake_minimum_required( VERSION 3.18 FATAL_ERROR )
 
 find_package( ecbuild 3.4 REQUIRED HINTS ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../ecbuild )
 
+set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
+
 project( ectrans LANGUAGES C CXX Fortran )
 include( ectrans_macros )
 
