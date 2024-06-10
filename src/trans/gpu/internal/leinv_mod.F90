@@ -188,6 +188,11 @@ CONTAINS
           DO J=1,(R_NSMAX-KM+2)/2
             ZINP(JK+(J-1)*IIN_STRIDES0+D_OFFSETS_GEMM2(KMLOC)*IIN_STRIDES0)=PIA(JK,IA+1+(J-1)*2,KMLOC)
           ENDDO
+          ! those are - in principle - only needed with tensor cores (zinp might contain NaNs!)
+          !$ACC LOOP SEQ
+          DO J=(R_NSMAX-KM+2)/2+1,ALIGN((R_NSMAX-KM+2)/2,A)
+            ZINP(JK+(J-1)*IIN_STRIDES0+D_OFFSETS_GEMM2(KMLOC)*IIN_STRIDES0)=0
+          ENDDO
         ELSEIF (MOD((JK-1),2) .EQ. 0) THEN
           ! every other field is sufficient because Im(KM=0) == 0
 #ifdef OMPGPU
@@ -197,6 +202,11 @@ CONTAINS
 #endif
           DO J=1,(R_NSMAX+2)/2
             ZINP0((JK-1)/2+1+(J-1)*IIN0_STRIDES0) = PIA(JK,IA+1+(J-1)*2,KMLOC)
+          ENDDO
+          ! those are - in principle - only needed with tensor cores (zinp might contain NaNs!)
+          !$ACC LOOP SEQ
+          DO J=(R_NSMAX+2)/2+1,ALIGN((R_NSMAX+2)/2,A)
+            ZINP0((JK-1)/2+1+(J-1)*IIN0_STRIDES0) = 0
           ENDDO
         ENDIF
       ENDDO
@@ -313,6 +323,11 @@ CONTAINS
           DO J=1,(R_NSMAX-KM+3)/2
             ZINP(JK+(J-1)*IIN_STRIDES0+D_OFFSETS_GEMM2(KMLOC)*IIN_STRIDES0)=PIA(JK,IS+1+(J-1)*2,KMLOC)
           ENDDO
+          ! those are - in principle - only needed with tensor cores (zinp might contain NaNs!)
+          !$ACC LOOP SEQ
+          DO J=(R_NSMAX-KM+3)/2+1,ALIGN((R_NSMAX-KM+3)/2,A)
+            ZINP(JK+(J-1)*IIN_STRIDES0+D_OFFSETS_GEMM2(KMLOC)*IIN_STRIDES0)=0
+          ENDDO
         ELSEIF (MOD((JK-1),2) == 0) THEN
 #ifdef OMPGPU
 #endif
@@ -321,6 +336,11 @@ CONTAINS
 #endif
           DO J=1,(R_NSMAX+3)/2
             ZINP0((JK-1)/2+1+(J-1)*IIN0_STRIDES0) = PIA(JK,IS+1+(J-1)*2,KMLOC)
+          ENDDO
+          ! those are - in principle - only needed with tensor cores (zinp might contain NaNs!)
+          !$ACC LOOP SEQ
+          DO J=(R_NSMAX+3)/2+1,ALIGN((R_NSMAX+3)/2,A)
+            ZINP0((JK-1)/2+1+(J-1)*IIN0_STRIDES0) = 0
           ENDDO
         ENDIF
       ENDDO
