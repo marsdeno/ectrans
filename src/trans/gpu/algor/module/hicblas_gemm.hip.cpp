@@ -1,4 +1,5 @@
 // (C) Copyright 2000- ECMWF.
+// (C) Copyright 2024- NVIDIA.
 //
 // This software is licensed under the terms of the Apache Licence Version 2.0
 // which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
@@ -64,9 +65,9 @@ template <typename Gemm, typename Real> void free_gemm_cache(float *, size_t) {
 // this version is using graphs and caches the graphs
 template <typename Gemm, typename Real>
 void run_group_graph(Gemm &&gemm, int const m, int const *n, int const *k,
-                     Real alpha, const Real *A, int lda, int const *offsetsA,
-                     const Real *B, int const *ldb, int const *offsetsB, Real beta,
-                     Real *C, int ldc, int const *offsetsC, int batchCount,
+                     Real alpha, const Real *A, int lda, int64_t const *offsetsA,
+                     const Real *B, int const *ldb, int64_t const *offsetsB, Real beta,
+                     Real *C, int ldc, int64_t const *offsetsC, int batchCount,
                      hipStream_t stream, int blas_id,
                      void *growing_allocator) {
   growing_allocator_register_free_c(growing_allocator,
@@ -134,8 +135,8 @@ void run_group_graph(Gemm &&gemm, int const m, int const *n, int const *k,
 // stupid simple gemm calls
 template <typename Gemm, typename Real>
 void run_group(Gemm &&gemm, int m, int *n, int *k, Real alpha, const Real *A,
-               int lda, int *offsetsA, const Real *B, int *ldb, int *offsetsB,
-               Real beta, Real *C, int ldc, int *offsetsC, int batchCount,
+               int lda, int64_t *offsetsA, const Real *B, int *ldb, int64_t *offsetsB,
+               Real beta, Real *C, int ldc, int64_t *offsetsC, int batchCount,
                hipStream_t stream, int = -1) {
   for (int i = 0; i < batchCount; ++i) {
     if (m == 0 || n[i] == 0 || k[i] == 0)
@@ -185,9 +186,9 @@ private:
 
 void hipblas_sgemm_wrapper_grouped(int blas_id, char transa, char transb,
                                    int m, int *n, int *k, float alpha,
-                                   const float *A, int lda, int *offsetsA,
-                                   const float *B, int *ldb, int *offsetsB, float beta,
-                                   float *C, int ldc, int *offsetsC,
+                                   const float *A, int lda, int64_t *offsetsA,
+                                   const float *B, int *ldb, int64_t *offsetsB, float beta,
+                                   float *C, int ldc, int64_t *offsetsC,
                                    int batchCount, hipStream_t stream,
                                   void *growing_allocator) {
 
@@ -212,10 +213,10 @@ void hipblas_sgemm_wrapper_grouped(int blas_id, char transa, char transb,
 void hipblas_dgemm_wrapper_grouped(int blas_id, char transa, char transb,
                                    int m, int *n, int *k,
                                    double alpha,
-                                   const double *A, int lda, int *offsetsA,
-                                   const double *B, int *ldb, int *offsetsB,
+                                   const double *A, int lda, int64_t *offsetsA,
+                                   const double *B, int *ldb, int64_t *offsetsB,
                                    double beta,
-                                   double *C, int ldc, int *offsetsC,
+                                   double *C, int ldc, int64_t *offsetsC,
                                    int batchCount, hipStream_t stream, void *) {
 
   hipblasOperation_t op_t1=HIPBLAS_OP_N, op_t2=HIPBLAS_OP_N;
@@ -288,9 +289,9 @@ void hipblas_sgemm_wrapper (char transa, char transb,
 
 void blas_sgemm_wrapper_grouped(int blas_id, char transa, char transb,
                                 int m, int *n, int *k, float alpha,
-                                const float *A, int lda, int *offsetsA,
-                                const float *B, int *ldb, int *offsetsB, float beta,
-                                float *C, int ldc, int *offsetsC,
+                                const float *A, int lda, int64_t *offsetsA,
+                                const float *B, int *ldb, int64_t *offsetsB, float beta,
+                                float *C, int ldc, int64_t *offsetsC,
                                 int batchCount, size_t stream,
                                 void *growing_allocator) {
 #ifdef USE_CUTLASS
@@ -309,9 +310,9 @@ void blas_sgemm_wrapper_grouped(int blas_id, char transa, char transb,
 
 void blas_dgemm_wrapper_grouped(int blas_id, char transa, char transb,
                                 int m, int *n, int *k, double alpha,
-                                const double *A, int lda, int *offsetsA,
-                                const double *B, int *ldb, int *offsetsB, double beta,
-                                double *C, int ldc, int *offsetsC,
+                                const double *A, int lda, int64_t *offsetsA,
+                                const double *B, int *ldb, int64_t *offsetsB, double beta,
+                                double *C, int ldc, int64_t *offsetsC,
                                 int batchCount, size_t stream,
                                 void *growing_allocator) {
     hipblas_dgemm_wrapper_grouped(blas_id, transa, transb, m, n, k, alpha, A, lda, offsetsA, B,
