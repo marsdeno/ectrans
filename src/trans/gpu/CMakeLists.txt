@@ -119,6 +119,8 @@ foreach( prec dp sp )
                 $<$<LINK_LANGUAGE:Fortran>:SHELL:${OpenACC_Fortran_FLAGS}>
                 $<$<LINK_LANG_AND_ID:C,NVHPC>:SHELL:${OpenACC_Fortran_FLAGS}>
                 $<$<LINK_LANG_AND_ID:CXX,NVHPC>:SHELL:${OpenACC_Fortran_FLAGS}> )
+           target_compile_options(trans_gpu_${prec} PUBLIC $<$<COMPILE_LANG_AND_ID:Fortran,NVHPC>:-cuda -gpu=nordc>)
+           target_link_options(trans_gpu_${prec} PUBLIC -cuda)
         endif()
 
   endif()
