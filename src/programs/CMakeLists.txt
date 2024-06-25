@@ -59,6 +59,7 @@ foreach( program ectrans-benchmark ectrans-benchmark-ifs )
                                       trans_gpu_${prec}
                                       OpenACC::OpenACC_Fortran
             )
+            target_compile_definitions(${program}-gpu-${prec} PUBLIC USE_GPU)
        endif()
     endforeach( prec )
   endif( HAVE_GPU )
