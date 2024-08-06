@@ -62,6 +62,8 @@
 #define hipStreamBeginCapture cudaStreamBeginCapture
 #define hipStreamEndCapture cudaStreamEndCapture
 
+#define hipblasSetWorkspace cublasSetWorkspace
+
 // Runtime calls
 #define hipHostMalloc(PTR, SIZE, FLAGS) cudaMallocHost(PTR, SIZE)
 #define hipMalloc cudaMalloc

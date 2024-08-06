@@ -353,3 +353,16 @@ extern "C" void hipblasSgemmBatched_finalize ()
 
 }
 
+
+extern "C" void hipblas_SetWorkspace(long int workspace_bytes)
+{
+    size_t workspace_size_in_bytes = 33554432; //(size_t) workspace_bytes;
+    hipblasStatus_t retval;
+    hipblasHandle_t handle = detail::get_hipblas_handle();
+    void* hipWorkspace;
+    hipMalloc(&hipWorkspace, workspace_size_in_bytes);
+
+    std::cout << "hipblas_SetWorkspace setting blas workspace to " << workspace_size_in_bytes << " bytes ... \n";
+    retval = hipblasSetWorkspace(handle, hipWorkspace, workspace_size_in_bytes);
+}
+
