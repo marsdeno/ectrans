@@ -129,6 +129,7 @@ logical :: lscders = .false.
 logical :: luvders = .false.
 logical :: lprint_norms = .false. ! Calculate and print spectral norms
 logical :: lmeminfo = .false. ! Show information from FIAT routine ec_meminfo at the end
+logical :: ll_on_device_array(11)
 
 integer(kind=jpim) :: nstats_mem = 0
 integer(kind=jpim) :: ntrace_stats = 0
@@ -598,11 +599,19 @@ ztloop = timef()
 !===================================================================================================
 ! Do spectral transform loop
 !===================================================================================================
+ll_on_device_array = (/.false.,.false.,.false.,.false.,.false.,.false.,.true.,.true.,.true.,.true.,.true./)
+ll_on_device_array = (/.true.,.true.,.true.,.true.,.true.,.true.,.true.,.true.,.true.,.true.,.true./)
+!ll_on_device_array = (/.false.,.false.,.false.,.false.,.false.,.false.,.false.,.false.,.false.,.false.,.false./)
 
 gstats_lstats = .false.
 
 write(nout,'(a,i5,a)') 'Running for ', iters, ' iterations with 2 extra warm-up iterations'
 write(nout,'(" ")')
+
+!$acc data copy(zspsc2,sp3d,zgmv,zgmvs)
+
+print *,'sleeping for 1s '
+call sleep(1)
 
 do jstep = 1, iters+2
   if (jstep == 3) gstats_lstats = .true.
@@ -631,7 +640,8 @@ do jstep = 1, iters+2
        & kvsetsc3a=ivset,                   &
        & pgp2=zgp2,                         &
        & pgpuv=zgpuv,                       &
-       & pgp3a=zgp3a)
+       & pgp3a=zgp3a,                       &
+       & ld_on_device_array = ll_on_device_array)
   else
     call inv_trans(kresol=1, kproma=nproma, &
        & pspsc2=zspsc2,                     & ! spectral surface pressure
@@ -640,7 +650,8 @@ do jstep = 1, iters+2
        & kvsetsc2=ivsetsc,                  &
        & kvsetsc3a=ivset,                   &
        & pgp2=zgp2,                         &
-       & pgp3a=zgp3a)
+       & pgp3a=zgp3a,                       &
+       & ld_on_device_array = ll_on_device_array)
   endif
   call gstats(4,1)
 
@@ -676,7 +687,8 @@ do jstep = 1, iters+2
       & pspsc3a=zspsc3a,                    &
       & kvsetuv=ivset,                      &
       & kvsetsc2=ivsetsc,                   &
-      & kvsetsc3a=ivset)
+      & kvsetsc3a=ivset,                    &
+      & ld_on_device_array = ll_on_device_array)
   else
     call dir_trans(kresol=1, kproma=nproma, &
       & pgp2=zgmvs(:,1:1,:),                &
@@ -713,6 +725,7 @@ do jstep = 1, iters+2
 
   if (lprint_norms) then
     call gstats(6,0)
+    !$acc update host(zspsc2,zspvor,zspdiv)
     call specnorm(pspec=zspsc2(1:1,:),         pnorm=znormsp,  kvset=ivsetsc(1:1))
     call specnorm(pspec=zspvor(1:nflevl,:),    pnorm=znormvor, kvset=ivset(1:nflevg))
     call specnorm(pspec=zspdiv(1:nflevl,:),    pnorm=znormdiv, kvset=ivset(1:nflevg))
@@ -761,6 +774,7 @@ do jstep = 1, iters+2
   call gstats(3,1)
 enddo
 
+!$acc end data
 !===================================================================================================
 
 ztloop = (timef() - ztloop)/1000.0_jprd
