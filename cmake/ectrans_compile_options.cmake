@@ -8,27 +8,35 @@
 
 
 if( CMAKE_Fortran_COMPILER_ID MATCHES "XL" )
-  ecbuild_add_fortran_flags("-qextname -qnobindcextname")
 elseif( CMAKE_Fortran_COMPILER_ID MATCHES "GNU" )
-  # gfortran 10 has become stricter with argument matching
-  if( NOT CMAKE_Fortran_COMPILER_VERSION VERSION_LESS 10 )
-    ecbuild_add_fortran_flags("-fallow-argument-mismatch")
-  endif()
 elseif( CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC" )
-  ecbuild_add_fortran_flags("-Mlarge_arrays")
-
-  # should really be part of configuration, or ecbuild default?
-  ecbuild_add_fortran_flags("-traceback"      BUILD DEBUG )
-  ecbuild_add_fortran_flags("-fast"           BUILD RELEASE )
-  ecbuild_add_fortran_flags("-gopt -fast"     BUILD RELWITHDEBINFO )
 elseif( CMAKE_Fortran_COMPILER_ID MATCHES "Cray" )
-  ecbuild_add_fortran_flags("-hnomessage=878")  # A module named ... has already been directly or indirectly use associated into this scope
-  ecbuild_add_fortran_flags("-hnomessage=867")  # Module ... has no public objects declared in the module, therefore nothing can be use associated from the module.
-  ecbuild_add_fortran_flags("-M7256")           # An OpenMP parallel construct in a target region is limited to a single thread.
 elseif( CMAKE_Fortran_COMPILER_ID MATCHES "Intel" )
-  ecbuild_add_fortran_flags("-march=core-avx2 -no-fma" BUILD BIT)
-  ecbuild_add_fortran_flags("-fast-transcendentals -fp-model precise -fp-speculation=safe")
+
+  set( ECTRANS_Fortran_FLAGS "-fp-model precise -fp-speculation=safe -fast-transcendentals -assume norealloc_lhs")
+  set( ECTRANS_Fortran_FLAGS_BIT "-march=core-avx2 -no-fma -O2 -align array32byte")
+  set( ECTRANS_Fortran_FLAGS_RELEASE "-march=core-avx2 -Ofast")
+  set( ECTRANS_Fortran_FLAGS_RELWITHDEBINFO "-g1 ${FOO_Fortran_FLAGS_RELEASE}")
+  set( ECTRANS_Fortran_FLAGS_DEBUG "-g -traceback -warn all")
+
+
 endif()
+
+if( NOT DEFINED ECTRANS_HAVE_CONTIGUOUS_ISSUE )
+  if( CMAKE_Fortran_COMPILER_ID MATCHES "Intel"  )
+    if( CMAKE_Fortran_COMPILER_VERSION VERSION_LESS_EQUAL 19)
+      set( ECTRANS_HAVE_CONTIGUOUS_ISSUE True )
+    endif()
+  elseif( CMAKE_Fortran_COMPILER_ID MATCHES "GNU"  )
+    if( CMAKE_Fortran_COMPILER_VERSION VERSION_EQUAL "9.2"
+     OR CMAKE_Fortran_COMPILER_VERSION VERSION_EQUAL "12.2.0" )
+      set( ECTRANS_HAVE_CONTIGUOUS_ISSUE True )
+    endif()
+  endif()
+endif()
+
+
+
 
 if( NOT DEFINED ECTRANS_HAVE_CONTIGUOUS_ISSUE )
   if( CMAKE_Fortran_COMPILER_ID MATCHES "Intel"  )
@@ -45,7 +53,7 @@ endif()
 
 macro( ectrans_add_compile_options )
   set( options NOFAIL )
-  set( single_value_args FLAGS)
+  set( single_value_args FLAGS BEHAVIOUR)
   set( multi_value_args SOURCES )
   cmake_parse_arguments( _PAR "${options}" "${single_value_args}" "${multi_value_args}"  ${_FIRST_ARG} ${ARGN} )
   if(_PAR_UNPARSED_ARGUMENTS)
@@ -57,12 +65,24 @@ macro( ectrans_add_compile_options )
   if(NOT _PAR_FLAGS)
     ecbuild_critical("FLAGS keyword missing to ectrans_add_compile_flags()")
   endif()
+  if(NOT _PAR_BEHAVIOUR)
+    ecbuild_info("BEHAVIOUR keyword not provided to ectrans_add_compile_flags(), defaulting to APPEND")
+    set( BEHAVIOUR "APPEND" )
+  elseif( NOT ${_PAR_BEHAVIOUR} MATCHES "APPEND|REPLACE")
+    ecbuild_critical("BEHAVIOUR keyword for ectrans_add_compile_flags() must be APPEND or REPLACE")
+  else()
+    set( BEHAVIOUR ${_PAR_BEHAVIOUR} )
+  endif()
+
+  if ( ${BEHAVIOUR} MATCHES "APPEND" )
+    set( BASE_FLAGS ${ECTRANS_Fortran_FLAGS_${CMAKE_BUILD_TYPE_CAPS}} )
+  else()
+    set( BASE_FLAGS "" )
+  endif()
+
   foreach( _file ${_PAR_SOURCES} )
     ecbuild_warn("Adding custom compile flags for file ${_file} : [${_PAR_FLAGS}]")
-    if( NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${_file} AND NOT _PAR_NOFAIL)
-        ecbuild_error("${_file} does not exist")
-    endif()
-    set_source_files_properties( ${_file} PROPERTIES COMPILE_FLAGS "${_PAR_FLAGS}" )
+    set_source_files_properties( ${_file} PROPERTIES COMPILE_FLAGS "${BASE_FLAGS} ${_PAR_FLAGS}" )
   endforeach()
 endmacro()
 
