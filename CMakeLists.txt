@@ -20,6 +20,13 @@ set(CMAKE_CXX_STANDARD 17)
 
 ecbuild_enable_fortran( REQUIRED NO_MODULE_DIRECTORY )
 
+#set( ECTRANS_ECBUILD_COMPILE_FLAGS ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ectrans_compile_options.cmake )
+if ( NOT ECTRANS_ECBUILD_COMPILE_FLAGS )
+  ecbuild_info("Ectrans-specific compile flags have not been provided, using ecbuild defaults")
+else()
+  ecbuild_info("Ectrans compile flags being set with ${ECTRANS_ECBUILD_COMPILE_FLAGS}")
+endif()
+
 ### Find (optional) dependencies
 
 ecbuild_find_package( NAME fiat REQUIRED )
@@ -165,7 +172,7 @@ ecbuild_add_option( FEATURE TESTS
                     CONDITION HAVE_CPU )
 
 ### Add sources and tests
-include( ectrans_compile_options )
+include( ectrans_add_compile_options )
 add_subdirectory( src )
 add_subdirectory( tests )
 

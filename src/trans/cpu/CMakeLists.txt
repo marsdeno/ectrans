@@ -6,29 +6,6 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
-## Apply workarounds for some known compilers
-
-if(CMAKE_Fortran_COMPILER_ID MATCHES "Cray")
-  if( CMAKE_Fortran_COMPILER_VERSION VERSION_GREATER_EQUAL 8.7 )
-
-    # Fix for IFS "CONGRAD: SPTSV/DPTSV returned non-zero info with crayftn 8.7.7 (cdt/18.12)
-    ectrans_add_compile_options(
-        SOURCES internal/ftinv_ctlad_mod.F90
-        FLAGS   "-O0,fp1,omp")
-
-  endif()
-endif()
-
-if(CMAKE_Fortran_COMPILER_ID MATCHES "Intel")
-  if( CMAKE_Fortran_COMPILER_VERSION VERSION_GREATER_EQUAL 18 AND CMAKE_Fortran_COMPILER_VERSION VERSION_LESS 19 )
-
-    # See https://github.com/ecmwf-ifs/ectrans/issues/17
-    ectrans_add_compile_options(
-        SOURCES algor/butterfly_alg_mod.F90
-        FLAGS   "-check nopointers")
-  endif()
-endif()
-
 
 function(generate_backend_sources)
   set (options)
@@ -117,6 +94,14 @@ foreach( prec dp sp )
     target_include_directories( trans_${prec} INTERFACE $<BUILD_INTERFACE:${BUILD_INTERFACE_INCLUDE_DIR}/trans_${prec}> )
     target_include_directories( trans_${prec} INTERFACE $<INSTALL_INTERFACE:include/ectrans/trans_${prec}> )
     target_link_libraries( trans_${prec} INTERFACE fiat ectrans_${prec} parkind_${prec})
+
+    if( CMAKE_Fortran_COMPILER_VERSION VERSION_GREATER_EQUAL 18 AND CMAKE_Fortran_COMPILER_VERSION VERSION_LESS 19 )
+      # See https://github.com/ecmwf-ifs/ectrans/issues/17
+      ectrans_add_compile_options(
+        SOURCES ${CMAKE_CURRENT_BINARY_DIR}/generated/ectrans_${prec}/algor/butterfly_alg_mod.F90
+        FLAGS   "${ECTRANS_Fortran_FLAGS_BIT} -check nopointers")
+    endif()
+
   endif()
 endforeach()
 
