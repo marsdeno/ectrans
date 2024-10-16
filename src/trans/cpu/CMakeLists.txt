@@ -95,7 +95,7 @@ foreach( prec dp sp )
     target_include_directories( trans_${prec} INTERFACE $<INSTALL_INTERFACE:include/ectrans/trans_${prec}> )
     target_link_libraries( trans_${prec} INTERFACE fiat ectrans_${prec} parkind_${prec})
 
-    if( CMAKE_Fortran_COMPILER_VERSION VERSION_GREATER_EQUAL 18 AND CMAKE_Fortran_COMPILER_VERSION VERSION_LESS 19 )
+    if( CMAKE_Fortran_COMPILER_VERSION VERSION_GREATER_EQUAL 18 AND CMAKE_Fortran_COMPILER_VERSION VERSION_LESS 2023 )
       # See https://github.com/ecmwf-ifs/ectrans/issues/17
       ectrans_add_compile_options(
         SOURCES ${CMAKE_CURRENT_BINARY_DIR}/generated/ectrans_${prec}/algor/butterfly_alg_mod.F90
