@@ -13,19 +13,32 @@ cmake_minimum_required( VERSION 3.18 FATAL_ERROR )
 
 find_package( ecbuild 3.4 REQUIRED HINTS ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../ecbuild )
 
+
+if( ECTRANS_GET_FLAGS_FROM_BUNDLE_IFS)
+  if (NOT DEFINED ENV{IFS_COMPILER_FAMILY})
+    ecbuild_critical("Environment variable IFS_COMPILER_FAMILY is not set, set it to one of gnu,intel,nvhpc ")
+  else()
+    set(_IFS_COMPILER_FAMILY $ENV{IFS_COMPILER_FAMILY})
+  endif()
+  set( ECTRANS_ECBUILD_COMPILE_FLAGS
+       ${CMAKE_CURRENT_SOURCE_DIR}/../ifs-source/cmake/compile_flags_${_IFS_COMPILER_FAMILY}.cmake )
+else()
+  set( ECTRANS_ECBUILD_COMPILE_FLAGS ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ectrans_compile_options.cmake )
+endif()
+
+if( NOT EXISTS ${ECTRANS_ECBUILD_COMPILE_FLAGS} )
+  ecbuild_critical("Ectrans-specific compile flags requested in ${ECTRANS_ECBUILD_COMPILE_FLAGS}, but file not found!")
+else()
+  ecbuild_info("Ectrans compile flags being set with ${ECTRANS_ECBUILD_COMPILE_FLAGS}")
+endif()
+
+
 project( ectrans LANGUAGES C CXX Fortran )
 include( ectrans_macros )
 
 set(CMAKE_CXX_STANDARD 17)
 
 ecbuild_enable_fortran( REQUIRED NO_MODULE_DIRECTORY )
-
-#set( ECTRANS_ECBUILD_COMPILE_FLAGS ${CMAKE_CURRENT_SOURCE_DIR}/cmake/ectrans_compile_options.cmake )
-if ( NOT ECTRANS_ECBUILD_COMPILE_FLAGS )
-  ecbuild_info("Ectrans-specific compile flags have not been provided, using ecbuild defaults")
-else()
-  ecbuild_info("Ectrans compile flags being set with ${ECTRANS_ECBUILD_COMPILE_FLAGS}")
-endif()
 
 ### Find (optional) dependencies
 
