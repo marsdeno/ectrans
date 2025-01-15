@@ -46,7 +46,9 @@ foreach( prec sp dp )
                              fiat
                              parkind_${prec}
                              trans_${prec}
+			     OpenMP::OpenMP_Fortran
                           )
+
     endif()
   endif()
 endforeach()
