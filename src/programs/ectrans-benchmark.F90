@@ -26,6 +26,9 @@ use oml_mod ,only : oml_max_threads
 use mpl_module
 use yomgstats, only: jpmaxstat, gstats_lstats => lstats
 use yomhook, only : dr_hook_init
+#ifdef HAVE_RAVE
+use rave_user_events, only : rave_begin_region, rave_end_region
+#endif
 
 use ectrans_memory, only : allocator
 
@@ -616,6 +619,10 @@ write(nout,'(a,i0,a,i0,a)') 'Running for ', iters, ' iterations with ', iters_wa
   & ' extra warm-up iterations'
 write(nout,'(" ")')
 
+#ifdef HAVE_RAVE
+call rave_begin_region("Benchmark Loop")
+#endif
+
 do jstep = 1, iters+iters_warmup
   if (jstep == iters_warmup + 1) then
     gstats_lstats = .true.
@@ -628,6 +635,10 @@ do jstep = 1, iters+iters_warmup
   !=================================================================================================
   ! Do inverse transform
   !=================================================================================================
+
+#ifdef HAVE_RAVE
+  call rave_begin_region("Inverse Transform")
+#endif
 
   ztstep1(jstep) = timef()
   call gstats(4,0)
@@ -665,6 +676,10 @@ do jstep = 1, iters+iters_warmup
   endif
   call gstats(4,1)
 
+#ifdef HAVE_RAVE
+  call rave_end_region("Inverse Transform")
+#endif
+
   ztstep1(jstep) = (timef() - ztstep1(jstep))/1000.0_jprd
 
   !=================================================================================================
@@ -699,6 +714,10 @@ do jstep = 1, iters+iters_warmup
   ! Do direct transform
   !=================================================================================================
 
+#ifdef HAVE_RAVE
+  call rave_begin_region("Direct Transform")
+#endif
+
   ztstep2(jstep) = timef()
 
   call gstats(5,0)
@@ -728,6 +747,10 @@ do jstep = 1, iters+iters_warmup
 
   endif
   call gstats(5,1)
+
+#ifdef HAVE_RAVE
+  call rave_end_region("Direct Transform")
+#endif
 
   ztstep2(jstep) = (timef() - ztstep2(jstep))/1000.0_jprd
 
@@ -777,6 +800,10 @@ do jstep = 1, iters+iters_warmup
   endif
   call gstats(3,1)
 enddo
+
+#ifdef HAVE_RAVE
+call rave_end_region("Benchmark Loop")
+#endif
 
 !===================================================================================================
 

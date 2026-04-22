@@ -47,6 +47,9 @@ SUBROUTINE FTDIR(PREEL,KFIELDS,KGL)
 !     ------------------------------------------------------------------
 
 USE PARKIND1  ,ONLY : JPIM, JPIB, JPRB
+#ifdef HAVE_RAVE
+USE RAVE_USER_EVENTS
+#endif
 
 USE TPM_DISTR       ,ONLY : D, MYSETW
 USE TPM_GEOMETRY    ,ONLY : G
@@ -63,6 +66,9 @@ INTEGER(KIND=JPIM) :: IGLG,IST,ILEN,JJ,IST1
 INTEGER(KIND=JPIM) :: IOFF,IRLEN,ICLEN, ITYPE
 
 !     ------------------------------------------------------------------
+#ifdef HAVE_RAVE
+CALL RAVE_BEGIN_REGION('FTDIR_KERNEL')
+#endif
 
 ITYPE=-1
 IGLG = D%NPTRLS(MYSETW)+KGL-1
@@ -82,6 +88,9 @@ IF (G%NLOEN(IGLG)==1) IST1=0
 DO JJ=IST1,ILEN
   PREEL(1:KFIELDS,IST+D%NSTAGTF(KGL)+JJ-1) = 0.0_JPRB
 ENDDO
+#ifdef HAVE_RAVE
+CALL RAVE_END_REGION('FTDIR_KERNEL')
+#endif
 
 !     ------------------------------------------------------------------
 

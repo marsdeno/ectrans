@@ -72,6 +72,9 @@ USE FSC_MOD         ,ONLY : FSC
 USE FTINV_MOD       ,ONLY : FTINV
 USE TRLTOG_MOD      ,ONLY : TRLTOG
 USE ABORT_TRANS_MOD ,ONLY : ABORT_TRANS
+#ifdef HAVE_RAVE
+USE RAVE_USER_EVENTS,ONLY : RAVE_BEGIN_REGION, RAVE_END_REGION
+#endif
 !
 
 IMPLICIT NONE
@@ -130,6 +133,10 @@ ZUVDERS => ZDUM
 !     ------------------------------------------------------------------
 
 !    1.  Copy Fourier data to local array
+
+#ifdef HAVE_RAVE
+CALL RAVE_BEGIN_REGION('FTINV_CTL_KERNEL')
+#endif
 
 CALL GSTATS(107,0)
 
@@ -283,6 +290,9 @@ CALL GSTATS(157,0)
 CALL TRLTOG(ZGTF,KF_FS,KF_GP,KF_SCALARS_G,IVSET,KPTRGP,&
  &PGP,PGPUV,PGP3A,PGP3B,PGP2)
 CALL GSTATS(157,1)
+#ifdef HAVE_RAVE
+CALL RAVE_END_REGION('FTINV_CTL_KERNEL')
+#endif
 
 !     ------------------------------------------------------------------
 

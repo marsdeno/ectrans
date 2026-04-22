@@ -13,6 +13,23 @@ find_package( ecbuild 3.8 REQUIRED HINTS ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CUR
 project( ectrans LANGUAGES C CXX Fortran )
 include( ectrans_macros )
 
+option( ECTRANS_RAVE "Enable RAVE instrumentation hooks in benchmark executables" OFF )
+set( ECTRANS_RAVE_INTERFACE_OBJECT "/apps/x86/rave/rave-frozen-09-2025/interfaces/rave_user_events_f.o"
+     CACHE FILEPATH "Path to the RAVE Fortran interface object file (rave_user_events_f.o)" )
+if( ECTRANS_RAVE )
+  if( EXISTS "${ECTRANS_RAVE_INTERFACE_OBJECT}" )
+    set( ECTRANS_HAVE_RAVE 1 )
+    get_filename_component( ECTRANS_RAVE_INTERFACE_DIR "${ECTRANS_RAVE_INTERFACE_OBJECT}" DIRECTORY )
+    include_directories( "${ECTRANS_RAVE_INTERFACE_DIR}" )
+    add_compile_definitions( HAVE_RAVE )
+    message( STATUS "RAVE instrumentation enabled with interface object: ${ECTRANS_RAVE_INTERFACE_OBJECT}" )
+  else()
+    ecbuild_critical( "ECTRANS_RAVE=ON but ECTRANS_RAVE_INTERFACE_OBJECT does not exist: ${ECTRANS_RAVE_INTERFACE_OBJECT}" )
+  endif()
+else()
+  set( ECTRANS_HAVE_RAVE 0 )
+endif()
+
 # CMake 3.29 adds CMAKE_TEST_LAUNCHER defined either as CMake variable or environment.
 # This launcher is a semi-colon-separted list of arguments that is used to launch serial tasks,
 # and can be defined during the CMake configuration.

@@ -65,6 +65,9 @@ USE TPM_DISTR       ,ONLY : D, MYPROC, NPROC
 USE TRGTOL_MOD      ,ONLY : TRGTOL
 USE FOURIER_OUT_MOD ,ONLY : FOURIER_OUT
 USE FTDIR_MOD       ,ONLY : FTDIR
+#ifdef HAVE_RAVE
+USE RAVE_USER_EVENTS,ONLY : RAVE_BEGIN_REGION, RAVE_END_REGION
+#endif
 !
 
 IMPLICIT NONE
@@ -98,6 +101,10 @@ INTEGER(KIND=JPIM) :: IFGP2,IFGP3A,IFGP3B,IOFF,J3
 !     ------------------------------------------------------------------
 
 ! Field distribution in Spectral/Fourier space
+
+#ifdef HAVE_RAVE
+CALL RAVE_BEGIN_REGION('FTDIR_CTL_KERNEL')
+#endif
 
 IF(PRESENT(KVSETUV)) THEN
   IVSETUV(:) = KVSETUV(:)
@@ -192,6 +199,9 @@ ENDIF
 CALL GSTATS(1640, 1)
 
 CALL GSTATS(106,1)
+#ifdef HAVE_RAVE
+CALL RAVE_END_REGION('FTDIR_CTL_KERNEL')
+#endif
 
 !     ------------------------------------------------------------------
 

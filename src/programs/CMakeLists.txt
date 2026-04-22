@@ -6,6 +6,11 @@
 # granted to it by virtue of its status as an intergovernmental organisation
 # nor does it submit to any jurisdiction.
 
+if( ECTRANS_HAVE_RAVE )
+  add_library( rave_obj OBJECT IMPORTED GLOBAL )
+  set_property( TARGET rave_obj PROPERTY IMPORTED_OBJECTS ${ECTRANS_RAVE_INTERFACE_OBJECT} )
+endif()
+
 #foreach( program ectrans-benchmark ectrans-benchmark-ifs )
 foreach( program ectrans-benchmark )
 
@@ -24,8 +29,10 @@ foreach( program ectrans-benchmark )
                                   fiat
                                   parkind_${prec}
                                   trans_${prec}
+                                  $<${ECTRANS_HAVE_RAVE}:rave_obj>
                                 DEFINITIONS
                                   VERSION="cpu"
+                                  $<${ECTRANS_HAVE_RAVE}:HAVE_RAVE>
         )
         ecbuild_target_fortran_module_directory(TARGET ${program}-cpu-${prec} MODULE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/module/${program}-cpu-${prec} )
       endif()

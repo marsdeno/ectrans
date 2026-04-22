@@ -46,6 +46,9 @@ SUBROUTINE FTINV(PREEL,KFIELDS,KGL)
 !     ------------------------------------------------------------------
 
 USE PARKIND1  ,ONLY : JPIM, JPRB
+#ifdef HAVE_RAVE
+USE RAVE_USER_EVENTS
+#endif
 
 USE TPM_DISTR       ,ONLY : D, MYSETW
 USE TPM_GEOMETRY    ,ONLY : G
@@ -61,6 +64,9 @@ INTEGER(KIND=JPIM) :: IGLG,IST,ILEN,JJ,JF,IST1
 INTEGER(KIND=JPIM) :: IOFF,IRLEN,ICLEN, ITYPE
 
 !     ------------------------------------------------------------------
+#ifdef HAVE_RAVE
+CALL RAVE_BEGIN_REGION('FTINV_KERNEL')
+#endif
 
 ITYPE = 1
 IGLG  = D%NPTRLS(MYSETW)+KGL-1
@@ -82,6 +88,9 @@ IF (G%NLOEN(IGLG)>1) THEN
 
   CALL EXEC_FFTW(ITYPE,IRLEN,ICLEN,IOFF,KFIELDS,TW%LALL_FFTW,PREEL)
 ENDIF
+#ifdef HAVE_RAVE
+CALL RAVE_END_REGION('FTINV_KERNEL')
+#endif
 
 !     ------------------------------------------------------------------
 

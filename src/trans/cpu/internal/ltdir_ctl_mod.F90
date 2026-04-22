@@ -46,6 +46,9 @@ USE TPM_DISTR       ,ONLY : D
 
 USE LTDIR_MOD       ,ONLY : LTDIR
 USE TRLTOM_MOD      ,ONLY : TRLTOM
+#ifdef HAVE_RAVE
+USE RAVE_USER_EVENTS,ONLY : RAVE_BEGIN_REGION, RAVE_END_REGION
+#endif
 !
 
 IMPLICIT NONE
@@ -65,6 +68,10 @@ INTEGER(KIND=JPIM) :: JM,IM,IBLEN,ILED2
 !     ------------------------------------------------------------------
 
 ! Transposition from Fourier space distribution to spectral space distribution
+
+#ifdef HAVE_RAVE
+CALL RAVE_BEGIN_REGION('LTDIR_CTL_KERNEL')
+#endif
 
 IBLEN = D%NLENGT0B*2*KF_FS
 IF (ALLOCATED(FOUBUF)) THEN
@@ -101,6 +108,9 @@ CALL GSTATS(1645,1)
 
 IF (.NOT.LALLOPERM) DEALLOCATE(FOUBUF)
 CALL GSTATS(103,1)
+#ifdef HAVE_RAVE
+CALL RAVE_END_REGION('LTDIR_CTL_KERNEL')
+#endif
 
 !     -----------------------------------------------------------------
 

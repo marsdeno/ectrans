@@ -18,6 +18,9 @@ SUBROUTINE LTDIR(KM,KMLOC,KF_FS,KF_UV,KF_SCALARS,KLED2,&
 
 USE PARKIND1  ,ONLY : JPIM     ,JPRB
 USE YOMHOOK   ,ONLY : LHOOK,   DR_HOOK, JPHOOK
+#ifdef HAVE_RAVE
+USE RAVE_USER_EVENTS
+#endif
 
 USE TPM_DIM         ,ONLY : R
 USE TPM_FIELDS      ,ONLY : F
@@ -121,6 +124,9 @@ REAL(KIND=JPHOOK) :: ZHOOK_HANDLE
 
 !     ------------------------------------------------------------------
 IF (LHOOK) CALL DR_HOOK('LTDIR_MOD',0,ZHOOK_HANDLE)
+#ifdef HAVE_RAVE
+CALL RAVE_BEGIN_REGION('LTDIR_KERNEL')
+#endif
 !     ------------------------------------------------------------------
 
 !*       4.    DIRECT LEGENDRE TRANSFORM.
@@ -192,6 +198,9 @@ CALL UPDSP(KM,KF_UV,KF_SCALARS,ZOA1,ZOA2, &
  & PSPSC3A,PSPSC3B,PSPSC2 , &
  & KFLDPTRUV,KFLDPTRSC)
 
+#ifdef HAVE_RAVE
+CALL RAVE_END_REGION('LTDIR_KERNEL')
+#endif
 !     ------------------------------------------------------------------
 IF (LHOOK) CALL DR_HOOK('LTDIR_MOD',1,ZHOOK_HANDLE)
 
