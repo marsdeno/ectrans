@@ -75,6 +75,18 @@ add_test( NAME ectrans_test_install
 
 add_subdirectory( trans/api )
 
+if( HAVE_FFT992 )
+  foreach( precision ${precisions} )
+    ecbuild_add_test(TARGET ectrans_test_bluestein_roundtrip_${precision}
+      SOURCES fft992/test_bluestein_roundtrip.F90
+      LIBS fft992_${precision} parkind_${precision}
+      LINKER_LANGUAGE Fortran
+      MPI 0
+      OMP 1
+    )
+  endforeach()
+endif()
+
 # --------------------------------------------------------------------------------------------------
 # Add a test for tangent-linear/adjoint correspondence of INV_TRANS and DIR_TRANS combined (CPU
 # version only)
@@ -196,6 +208,11 @@ if( TARGET ectrans-benchmark-gpu-sp )
 endif()
 
 foreach( benchmark ${benchmarks} )
+  set( benchmark_fft_args )
+  if( NOT HAVE_FFTW AND HAVE_FFT992 )
+    set( benchmark_fft_args --fft992 )
+  endif()
+
   # Establish which task/thread parameters to test
   set( ntasks 0 )
   set( nthreads 1 )
@@ -235,7 +252,7 @@ foreach( benchmark ${benchmarks} )
         # Check it works with 0 3D scalar fields
         ecbuild_add_test( TARGET ${base_title}_nfld0
             COMMAND ${benchmark}
-            ARGS --truncation ${t} --grid ${grid} --nfld 0 --check 100 --callmode ${callmode} --dump-checksums ${base_title}_nfld0 ${base_args}
+            ARGS --truncation ${t} --grid ${grid} --nfld 0 --check 100 --callmode ${callmode} --dump-checksums ${base_title}_nfld0 ${benchmark_fft_args} ${base_args}
             MPI ${mpi}
             OMP ${omp}
         )
@@ -244,7 +261,7 @@ foreach( benchmark ${benchmarks} )
         # Check it works with 10 3D scalar fields and 20 levels
         ecbuild_add_test( TARGET ${base_title}_nfld10_nlev20
             COMMAND ${benchmark}
-            ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --check 100 --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20 ${base_args}
+            ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --check 100 --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20 ${benchmark_fft_args} ${base_args}
             MPI ${mpi}
             OMP ${omp}
         )
@@ -253,7 +270,7 @@ foreach( benchmark ${benchmarks} )
         # Check it works with 10 3D scalar fields, 20 levels, and derivatives
         ecbuild_add_test( TARGET ${base_title}_nfld10_nlev20_derivatives
             COMMAND ${benchmark}
-            ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --scders --uvders --check 100 --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20_derivatives ${base_args}
+            ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --scders --uvders --check 100 --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20_derivatives ${benchmark_fft_args} ${base_args}
             MPI ${mpi}
             OMP ${omp}
         )
@@ -262,7 +279,7 @@ foreach( benchmark ${benchmarks} )
         # Check it works with 10 3D scalar fields, 20 levels, and vordiv in grid point space
         ecbuild_add_test( TARGET ${base_title}_nfld10_nlev20_vordiv
             COMMAND ${benchmark}
-            ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --vordiv --check 100  --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20_vordiv ${base_args}
+            ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --vordiv --check 100  --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20_vordiv ${benchmark_fft_args} ${base_args}
             MPI ${mpi}
             OMP ${omp}
         )
@@ -271,7 +288,7 @@ foreach( benchmark ${benchmarks} )
         # Check it works with 10 3D scalar fields, 20 levels, and NPROMA=16
         ecbuild_add_test( TARGET ${base_title}_nfld10_nlev20_nproma16
             COMMAND ${benchmark}
-            ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --nproma 16 --check 100 --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20_nproma16 ${base_args}
+            ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --nproma 16 --check 100 --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20_nproma16 ${benchmark_fft_args} ${base_args}
             MPI ${mpi}
             OMP ${omp}
         )
@@ -281,7 +298,7 @@ foreach( benchmark ${benchmarks} )
         if( ${benchmark} MATCHES "cpu" AND ${callmode} MATCHES "1" )
           ecbuild_add_test( TARGET ${base_title}_nfld10_nlev20_npromatr20
               COMMAND ${benchmark}
-              ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --npromatr 20 --check 100 --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20_npromatr20 ${base_args}
+              ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --npromatr 20 --check 100 --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20_npromatr20 ${benchmark_fft_args} ${base_args}
               MPI ${mpi}
               OMP ${omp}
           )
@@ -293,7 +310,7 @@ foreach( benchmark ${benchmarks} )
           # TODO: Find out why the FLT gives so much higher errors
           ecbuild_add_test( TARGET ${base_title}_nfld10_nlev20_flt
               COMMAND ${benchmark}
-              ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --flt --check 1000000 --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20_flt ${base_args}
+              ARGS --truncation ${t} --grid ${grid} --nfld 10 --nlev 20 --flt --check 1000000 --callmode ${callmode} --dump-checksums ${base_title}_nfld10_nlev20_flt ${benchmark_fft_args} ${base_args}
               MPI ${mpi}
               OMP ${omp}
           )
@@ -401,12 +418,17 @@ if( HAVE_TRANSI )
   endif()
 
   find_package( CMath )
+  set( transi_fft_defs )
+  if( NOT HAVE_FFTW AND HAVE_FFT992 )
+    list( APPEND transi_fft_defs TRANSI_TEST_FFT_BACKEND=TRANS_FFT992 )
+  endif()
+
   ecbuild_add_library( TARGET ectrans_test
     SOURCES     transi/transi_test.h transi/transi_test.c
     PUBLIC_LIBS transi_dp ${CMATH_LIBRARIES}
     NOINSTALL
   )
-  target_compile_definitions( ectrans_test PUBLIC ${TEST_DEFINITIONS} )
+  target_compile_definitions( ectrans_test PUBLIC ${TEST_DEFINITIONS} ${transi_fft_defs} )
 
   if( HAVE_GPU )
     ecbuild_add_library( TARGET ectrans_test_gpu
