@@ -76,6 +76,10 @@ foreach( prec dp sp )
     ecbuild_debug("target_link_libraries( ectrans_${prec} PRIVATE ${LAPACK_LIBRARIES} )")
     target_link_libraries( ectrans_${prec} PRIVATE ${LAPACK_LIBRARIES} )
 
+    if( HAVE_BATCHED_BLAS )
+      target_compile_definitions( ectrans_${prec} PRIVATE HAVE_BATCHED_BLAS )
+    endif()
+
     if( HAVE_OMP )
       ecbuild_debug("target_link_libraries( ectrans_${prec} PRIVATE OpenMP::OpenMP_Fortran )")
       target_link_libraries( ectrans_${prec} PRIVATE OpenMP::OpenMP_Fortran )

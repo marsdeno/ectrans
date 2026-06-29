@@ -30,7 +30,9 @@ module_purge
 module_load prgenv/intel
 module_load intel/2023.2.0
 module_load hpcx-openmpi/2.9.0
-module_load intel-mkl/19.0.5
+#module_load intel-mkl/19.0.5
+#use 2023 MKL for batched api
+module_load intel-mkl/2023.2.0
 module_load fftw/3.3.10
 module_load cmake/3.25.2
 module_load ninja/1.10.0
