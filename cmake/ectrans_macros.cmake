@@ -19,6 +19,7 @@ if( NOT ${PROJECT_NAME}_GIT_SHA1 )
 endif()
 
 include( ectrans_find_lapack )
+include( ectrans_find_batched_blas )
 include( ectrans_find_cuda )
 include( ectrans_find_hip )
 include( ectrans_add_flags )

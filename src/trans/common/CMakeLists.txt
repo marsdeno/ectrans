@@ -14,6 +14,7 @@ list( APPEND ectrans_common_src
   sharedmem/sharedmem_mod.F90
   sharedmem/sharedmem.c
   internal/ectrans_blas_mod.F90
+  internal/ectrans_blas_batched_mod.F90
   internal/abort_trans_mod.F90
   internal/cpledn_mod.F90
   internal/field_split_mod.F90
@@ -80,6 +81,10 @@ ecbuild_target_fortran_module_directory(
 if( HAVE_OMP )
   ecbuild_debug("target_link_libraries( ectrans_common PRIVATE OpenMP::OpenMP_Fortran )")
   target_link_libraries( ectrans_common PRIVATE OpenMP::OpenMP_Fortran )
+endif()
+
+if( HAVE_BATCHED_BLAS )
+  target_compile_definitions( ectrans_common PRIVATE HAVE_BATCHED_BLAS )
 endif()
 
 set( ectrans_common_includes ${ectrans_common_includes} PARENT_SCOPE )

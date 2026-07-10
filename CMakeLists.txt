@@ -189,6 +189,12 @@ ecbuild_add_option( FEATURE ECTRANS4PY
 
 ectrans_find_lapack()
 
+ecbuild_add_option( FEATURE BATCHED_BLAS
+                    DEFAULT OFF
+		    DESCRIPTION "Use batched GEMM (cblas/sgemm_batch / cblas_dgemm_batch) for the Legendre transform if the BLAS provider supports it (e.g. MKL, or BLIS)." )
+
+ectrans_find_batched_blas()
+
 ecbuild_add_option( FEATURE FIELD_API
                     DEFAULT OFF
                     DESCRIPTION "Compile field API interface to ectrans"
