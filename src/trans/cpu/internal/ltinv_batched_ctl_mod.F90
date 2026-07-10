@@ -126,11 +126,21 @@ IF (ALLOCATED(FOUBUF_IN)) THEN
   ENDIF
 ELSE
   ALLOCATE(FOUBUF_IN(MAX(1, IBLEN)))
-  FOUBUF_IN(:) = 0.0_JPRB
+  ! OMP-parallel first-touch zero
+!$OMP PARALLEL DO SCHEDULE(STATIC)
+  DO J=1,SIZE(FOUBUF_IN)
+    FOUBUF_IN(J) = 0.0_JPRB
+  ENDDO
+!$OMP END PARALLEL DO
 ENDIF
 
+! ASRE1B doesn't write everywhere, so zero array in LDLL case
 IF (S%LDLL) THEN
-  FOUBUF_IN(:) = 0.0_JPRB
+!$OMP PARALLEL DO SCHEDULE(STATIC)
+  DO J=1,SIZE(FOUBUF_IN)
+    FOUBUF_IN(J) = 0.0_JPRB
+  ENDDO
+!$OMP END PARALLEL DO
 ENDIF
 
 ! ------------------------------------------------------------------
