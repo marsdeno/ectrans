@@ -81,4 +81,115 @@ ENDDO
 !     ------------------------------------------------------------------
 
 END SUBROUTINE FOURIER_IN
+
+! =====================================================================
+! FOURIER_IN + FSC fusion (CPU inverse-transform hot path)
+! ---------------------------------------------------------------------
+! Combines the FOUBUF->PREEL copy (FOURIER_IN) with FSC's per-latitude
+! Fourier-space operations:
+!   * scale U and V by 1/(a*cos(theta))
+!   * scale N-S derivatives by 1/(a*cos(theta))
+!   * compute scalar E-W derivatives on the fly
+! into a single JM loop, eliminating 3 extra passes over PREEL that FSC
+! would otherwise do after FOURIER_IN.
+!
+! Not implemented for LATLON and LUVDER cases, so fall back to split FOURIER_IN + FSC.
+!
+! =====================================================================
+SUBROUTINE FOURIER_IN_FSC(PREEL, KF_OUT_LT, KGL, &
+ & KF_UV, IST_UV, KF_SCALARS, IST_SC, KF_SCDERS, IST_NS, IST_EW)
+
+USE PARKIND1,     ONLY : JPIM, JPRB
+USE TPM_DISTR,    ONLY : D, MYSETW
+USE TPM_TRANS,    ONLY : FOUBUF
+USE TPM_GEOMETRY, ONLY : G
+USE TPM_FIELDS,   ONLY : F
+
+IMPLICIT NONE
+
+REAL(KIND=JPRB),    INTENT(INOUT) :: PREEL(:,:)
+INTEGER(KIND=JPIM), INTENT(IN)    :: KF_OUT_LT   ! # rows loaded from FOUBUF
+INTEGER(KIND=JPIM), INTENT(IN)    :: KGL
+INTEGER(KIND=JPIM), INTENT(IN)    :: KF_UV, IST_UV
+INTEGER(KIND=JPIM), INTENT(IN)    :: KF_SCALARS, IST_SC
+INTEGER(KIND=JPIM), INTENT(IN)    :: KF_SCDERS, IST_NS, IST_EW
+
+INTEGER(KIND=JPIM) :: JM, JF, IGLG, IPROC, IR, II, ISTA, IMEN, ISTAGTF, IEND_COPY
+REAL(KIND=JPRB)    :: ZACHTE2, ZMUL, ZRE, ZIM
+
+! ------------------------------------------------------------------
+
+IGLG    = D%NPTRLS(MYSETW) + KGL - 1
+IMEN    = G%NMEN(IGLG)
+ISTAGTF = D%NSTAGTF(KGL)
+! LATLON+LDLL branch is excluded by caller, so ZACHTE == ZACHTE2 always
+ZACHTE2 = REAL(F%RACTHE(IGLG), JPRB)
+
+! Copy-only leading rows: 1..IEND_COPY (Vor and/or Div, or empty)
+IF (KF_UV > 0) THEN
+  IEND_COPY = IST_UV - 1
+ELSE IF (KF_SCALARS > 0) THEN
+  IEND_COPY = IST_SC - 1
+ELSE
+  IEND_COPY = KF_OUT_LT
+ENDIF
+
+DO JM = 0, IMEN
+  IPROC = D%NPROCM(JM)
+  IR    = 2*JM + 1 + ISTAGTF
+  II    = 2*JM + 2 + ISTAGTF
+  ISTA  = (D%NSTAGT0B(D%MSTABF(IPROC)) + D%NPNTGTB0(JM,KGL)) * 2 * KF_OUT_LT
+  ZMUL  = ZACHTE2 * REAL(JM, JPRB)
+
+  ! pure copy (Vor + Div, or empty)
+  !$OMP SIMD
+  DO JF = 1, IEND_COPY
+    PREEL(JF, IR) = FOUBUF(ISTA + 2*JF - 1)
+    PREEL(JF, II) = FOUBUF(ISTA + 2*JF)
+  ENDDO
+
+  ! U and V -- load + scale by 1/(a*cos(theta))
+  IF (KF_UV > 0) THEN
+    !$OMP SIMD
+    DO JF = IST_UV, IST_UV + 2*KF_UV - 1
+      PREEL(JF, IR) = FOUBUF(ISTA + 2*JF - 1) * ZACHTE2
+      PREEL(JF, II) = FOUBUF(ISTA + 2*JF)     * ZACHTE2
+    ENDDO
+  ENDIF
+
+  ! scalars -- copy, and if derivatives requested also compute
+  ! E-W derivatives on the fly from the just-loaded scalar values.
+  IF (KF_SCALARS > 0) THEN
+    IF (KF_SCDERS > 0) THEN
+      !$OMP SIMD PRIVATE(ZRE, ZIM)
+      DO JF = 0, KF_SCALARS - 1
+        ZRE = FOUBUF(ISTA + 2*(IST_SC + JF) - 1)
+        ZIM = FOUBUF(ISTA + 2*(IST_SC + JF))
+        PREEL(IST_SC + JF, IR) =  ZRE
+        PREEL(IST_SC + JF, II) =  ZIM
+        PREEL(IST_EW + JF, IR) = -ZIM * ZMUL
+        PREEL(IST_EW + JF, II) =  ZRE * ZMUL
+      ENDDO
+    ELSE
+      !$OMP SIMD
+      DO JF = IST_SC, IST_SC + KF_SCALARS - 1
+        PREEL(JF, IR) = FOUBUF(ISTA + 2*JF - 1)
+        PREEL(JF, II) = FOUBUF(ISTA + 2*JF)
+      ENDDO
+    ENDIF
+  ENDIF
+
+  ! N-S derivatives -- load + scale by 1/(a*cos(theta))
+  IF (KF_SCDERS > 0) THEN
+    !$OMP SIMD
+    DO JF = IST_NS, IST_NS + KF_SCDERS - 1
+      PREEL(JF, IR) = FOUBUF(ISTA + 2*JF - 1) * ZACHTE2
+      PREEL(JF, II) = FOUBUF(ISTA + 2*JF)     * ZACHTE2
+    ENDDO
+  ENDIF
+ENDDO
+
+! ------------------------------------------------------------------
+
+END SUBROUTINE FOURIER_IN_FSC
 END MODULE FOURIER_IN_MOD
