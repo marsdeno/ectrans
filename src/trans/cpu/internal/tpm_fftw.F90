@@ -23,7 +23,7 @@ USE, INTRINSIC :: ISO_C_BINDING
 
 USE PARKIND1   ,ONLY : JPIB, JPIM, JPRB, JPRD
 USE MPL_MODULE ,ONLY : MPL_MYRANK, MPL_RANK, MPL_NUMPROC, &
-  & MPL_ALLGATHERV, MPL_GATHERV
+  & MPL_SEND, MPL_RECV
 USE YOMHOOK    ,ONLY : LHOOK, DR_HOOK, JPHOOK
 USE OMP_LIB    ,ONLY : OMP_GET_MAX_THREADS, OMP_GET_THREAD_NUM
 
@@ -80,6 +80,11 @@ INTEGER(C_SIZE_T), ALLOCATABLE, SAVE :: ZFFT_PERSIST_CAPS(:)
 ! Default (and unset ECTRANS_FFTW_WISDOM) behaviour: FFTW_ESTIMATE+FFTW_NO_SIMD, no wisdom I/O,
 LOGICAL, SAVE :: LUSE_MEASURE     = .FALSE.
 LOGICAL, SAVE :: LWISDOM_IMPORTED = .FALSE.
+
+! Bytes-per-word for the dense 4-bytes-per-JPIM packing used by the
+! wisdom transport code below.
+INTEGER(KIND=JPIM), PARAMETER :: IBPW_WISDOM = 4
+
 
 ! libc free() for releasing the malloc'd string returned by
 ! fftw{,f}_export_wisdom_to_string
@@ -168,33 +173,112 @@ ENDIF
 END SUBROUTINE IMPORT_FFTW_WISDOM
 
 
+! Export the current FFTW planner's wisdom to a packed JPIM word buffer.
+! Returns an allocated IBUF (word-array), IWORDS (word count) and
+! ILEN_BYTES (actual NUL-terminated byte length). Bytes beyond ILEN_BYTES
+! within the last word are zero-padded and never read on the unpack
+! side. The FFTW C string is malloc'd and freed here via C_FREE.
+SUBROUTINE PACK_LOCAL_WISDOM(IBUF, IWORDS, ILEN_BYTES)
+INTEGER(KIND=JPIM), ALLOCATABLE, INTENT(OUT) :: IBUF(:)
+INTEGER(KIND=JPIM),              INTENT(OUT) :: IWORDS
+INTEGER(KIND=JPIM),              INTENT(OUT) :: ILEN_BYTES
+CHARACTER(KIND=C_CHAR), POINTER :: ZLOC(:)
+TYPE(C_PTR)        :: IPTR
+INTEGER(KIND=JPIM) :: JJ, IHUGE, IWORD, IBPOS
+
+IF (JPRB == JPRD) THEN
+  IPTR = FFTW_EXPORT_WISDOM_TO_STRING()
+ELSE
+  IPTR = FFTWF_EXPORT_WISDOM_TO_STRING()
+ENDIF
+
+ILEN_BYTES = 0
+IF (C_ASSOCIATED(IPTR)) THEN
+  IHUGE = 16 * 1024 * 1024 !! 16 MB
+  CALL C_F_POINTER(IPTR, ZLOC, [IHUGE])
+  DO JJ = 1, IHUGE
+    IF (ZLOC(JJ) == C_NULL_CHAR) EXIT
+    ILEN_BYTES = ILEN_BYTES + 1
+  ENDDO
+ENDIF
+
+IWORDS = (ILEN_BYTES + IBPW_WISDOM - 1) / IBPW_WISDOM
+ALLOCATE(IBUF(MAX(IWORDS, 1)))
+IBUF(:) = 0
+DO JJ = 1, ILEN_BYTES
+  IWORD = (JJ - 1) / IBPW_WISDOM + 1
+  IBPOS = MOD(JJ - 1, IBPW_WISDOM)
+  IBUF(IWORD) = IOR(IBUF(IWORD), &
+    & ISHFT(IAND(ICHAR(ZLOC(JJ)), 255), 8 * IBPOS))
+ENDDO
+
+IF (C_ASSOCIATED(IPTR)) CALL C_FREE(IPTR)
+NULLIFY(ZLOC)
+END SUBROUTINE PACK_LOCAL_WISDOM
+
+
+! Unpack a packed word buffer (IBUF, ILEN_BYTES bytes) and import into
+! the local FFTW planner. FFTW wisdom is additive, so this merges the
+! incoming plans with what the local planner already knows.
+SUBROUTINE UNPACK_AND_IMPORT_WISDOM(IBUF, ILEN_BYTES, LDOK)
+INTEGER(KIND=JPIM), INTENT(IN)  :: IBUF(:)
+INTEGER(KIND=JPIM), INTENT(IN)  :: ILEN_BYTES
+LOGICAL,            INTENT(OUT) :: LDOK
+CHARACTER(KIND=C_CHAR), ALLOCATABLE, TARGET :: ZSTR(:)
+INTEGER(KIND=JPIM) :: JJ, IWORD, IBPOS, IBYTE
+INTEGER(C_INT)     :: IRET
+
+LDOK = .TRUE.
+IF (ILEN_BYTES <= 0) RETURN
+
+ALLOCATE(ZSTR(ILEN_BYTES + 1))
+DO JJ = 1, ILEN_BYTES
+  IWORD = (JJ - 1) / IBPW_WISDOM + 1
+  IBPOS = MOD(JJ - 1, IBPW_WISDOM)
+  IBYTE = IAND(ISHFT(IBUF(IWORD), -8 * IBPOS), 255)
+  ZSTR(JJ) = ACHAR(IBYTE)
+ENDDO
+ZSTR(ILEN_BYTES + 1) = C_NULL_CHAR
+
+IF (JPRB == JPRD) THEN
+  IRET = FFTW_IMPORT_WISDOM_FROM_STRING(ZSTR)
+ELSE
+  IRET = FFTWF_IMPORT_WISDOM_FROM_STRING(ZSTR)
+ENDIF
+DEALLOCATE(ZSTR)
+LDOK = (IRET == 1)
+END SUBROUTINE UNPACK_AND_IMPORT_WISDOM
+
+
 ! Export FFTW wisdom to <ECTRANS_FFTW_WISDOM>.{dp,sp}.
 !
-! In MPI runs each rank only measures plans for its own set
-! of latitudes, so rank 1's wisdom is insufficient. 
-! Gather every rank's wisdom string to rank 1, import them with rank 1
-! (FFTW wisdom is additive), and then export to disk from rank 1.
-! MPL_GATHER remains manageable (5MB for tco639 on 32 ranks) and scales
-! linearly with NPROC
+! In MPI runs each rank only measures plans for its own set of
+! latitudes, so any single rank's wisdom is insufficient. FFTW wisdom
+! is additive (importing A then B yields the union), which lets us
+! reduce it in a butterfly tree instead of flat-gathering to one rank:
+!
+!   at step k (stride 2^k), ranks with bit k clear receive from the
+!   peer with bit k set, import the peer's wisdom into their local
+!   planner, and re-export the accumulated union upward on the next
+!   step. Ranks with bit k set send once and then drop out.
+!
+! After ceil(log2(NPROC)) steps rank 1 holds the full union in its
+! FFTW planner and writes it to disk. Per-hop message size is bounded
+! by the number of *unique* plans in the accumulated union, not by
+! sum-of-per-rank-wisdoms, so the transport does not scale with NPROC
+! and the O(NPROC) count/displacement arrays of the previous flat
+! MPL_GATHERV implementation are gone.
 SUBROUTINE EXPORT_FFTW_WISDOM
 CHARACTER(LEN=:),       ALLOCATABLE :: ZPATH
 CHARACTER(KIND=C_CHAR), ALLOCATABLE :: ZCPATH(:)
-CHARACTER(KIND=C_CHAR), POINTER     :: ZLOC(:)
-CHARACTER(KIND=C_CHAR), ALLOCATABLE, TARGET :: ZRANK(:)
-INTEGER(KIND=JPIM),     ALLOCATABLE :: IBUF_LOC(:), IBUF_ALL(:)
-INTEGER(KIND=JPIM),     ALLOCATABLE :: ILENS(:), IWORDS(:), IDISPLS(:), IONES(:)
-INTEGER(KIND=JPIM) :: ISTAT, ILEN_LOC, IWORDS_LOC, ITOT_WORDS
-INTEGER(KIND=JPIM) :: JR, JJ, IHUGE, IWORD, IBPOS, IBYTE
-INTEGER(KIND=JPIM) :: IOFF, IL
+INTEGER(KIND=JPIM), ALLOCATABLE :: IBUF_LOC(:), IBUF_RECV(:)
+INTEGER(KIND=JPIM) :: ISTAT, ILEN_LOC, IWORDS_LOC
+INTEGER(KIND=JPIM) :: IHEADER(2)
+INTEGER(KIND=JPIM) :: IR0, ISTRIDE, IPEER_R0, IPEER_1B
 INTEGER(C_INT)     :: IRET
-TYPE(C_PTR)        :: IPTR
-LOGICAL            :: LLROOT, LLMPI
-! Dense byte packing: 4 bytes per JPIM word (previously 1 byte per JPIM).
-! Cuts the gather payload by 4x, giving 4x more headroom before ITOT_WORDS
-! or the MPI count/displ arguments (INTEGER(JPIM)) overflow at large
-! NPROC. The remaining O(NPROC) scaling is addressed in a follow-up
-! commit (hierarchical union reduction).
-INTEGER(KIND=JPIM), PARAMETER :: IBPW = 4  ! bytes per JPIM word
+LOGICAL            :: LLROOT, LLMPI, LLACTIVE, LLOK
+INTEGER(KIND=JPIM), PARAMETER :: ITAG_HDR = 12341
+INTEGER(KIND=JPIM), PARAMETER :: ITAG_BUF = 12342
 
 ! this does nothing if ECTRANS_FFTW_WISDOM environment variable not set
 CALL WISDOM_FILENAME(ZPATH, ISTAT)
@@ -203,116 +287,61 @@ IF (ISTAT /= 0) RETURN
 LLMPI  = (MPL_NUMPROC >= 1)
 LLROOT = (.NOT. LLMPI) .OR. (MPL_RANK == 1)
 
-! every rank exports its own wisdom to an in-memory C string.
-! FFTW returns a malloc'd, NUL-terminated buffer that needs to be freed
-IF (JPRB == JPRD) THEN
-  IPTR = FFTW_EXPORT_WISDOM_TO_STRING()
-ELSE
-  IPTR = FFTWF_EXPORT_WISDOM_TO_STRING()
-ENDIF
+! Snapshot the local planner state as a packed buffer.
+CALL PACK_LOCAL_WISDOM(IBUF_LOC, IWORDS_LOC, ILEN_LOC)
 
-! Determine the length by scanning to the NUL terminator
-ILEN_LOC = 0
-IF (C_ASSOCIATED(IPTR)) THEN
-  IHUGE = 16 * 1024 * 1024 !! 16 MB ... generous :) 
-  CALL C_F_POINTER(IPTR, ZLOC, [IHUGE])
-  DO JJ = 1, IHUGE
-    IF (ZLOC(JJ) == C_NULL_CHAR) EXIT
-    ILEN_LOC = ILEN_LOC + 1
+IF (LLMPI .AND. MPL_NUMPROC > 1) THEN
+  ! Butterfly reduce-to-root (rank 1 is the root). Ranks are 1-based
+  ! in MPL; work with the 0-based rank IR0 for the bit arithmetic.
+  IR0      = MPL_RANK - 1
+  ISTRIDE  = 1
+  LLACTIVE = .TRUE.
+  DO WHILE (ISTRIDE < MPL_NUMPROC .AND. LLACTIVE)
+    IF (MOD(IR0, 2*ISTRIDE) == 0) THEN
+      ! Receiver: pull from IR0 + ISTRIDE if that rank exists.
+      IPEER_R0 = IR0 + ISTRIDE
+      IF (IPEER_R0 < MPL_NUMPROC) THEN
+        IPEER_1B = IPEER_R0 + 1
+        CALL MPL_RECV(IHEADER, KSOURCE=IPEER_1B, KTAG=ITAG_HDR, &
+          & CDSTRING='TPM_FFTW:WISDOM_TREE:HDR')
+        IF (IHEADER(2) > 0) THEN
+          ALLOCATE(IBUF_RECV(IHEADER(2)))
+          CALL MPL_RECV(IBUF_RECV, KSOURCE=IPEER_1B, KTAG=ITAG_BUF, &
+            & CDSTRING='TPM_FFTW:WISDOM_TREE:BUF')
+          CALL UNPACK_AND_IMPORT_WISDOM(IBUF_RECV, IHEADER(1), LLOK)
+          IF (.NOT. LLOK) THEN
+            WRITE(0,'(A,I0)') &
+              & 'TPM_FFTW: WARNING failed to merge wisdom from rank ', IPEER_1B
+          ENDIF
+          DEALLOCATE(IBUF_RECV)
+          ! Re-export the (now larger) union so subsequent steps
+          ! forward the accumulated wisdom upward.
+          DEALLOCATE(IBUF_LOC)
+          CALL PACK_LOCAL_WISDOM(IBUF_LOC, IWORDS_LOC, ILEN_LOC)
+        ENDIF
+      ENDIF
+    ELSE
+      ! Sender: push to IR0 - ISTRIDE and drop out.
+      IPEER_R0 = IR0 - ISTRIDE
+      IPEER_1B = IPEER_R0 + 1
+      IHEADER(1) = ILEN_LOC
+      IHEADER(2) = IWORDS_LOC
+      CALL MPL_SEND(IHEADER, KDEST=IPEER_1B, KTAG=ITAG_HDR, &
+        & CDSTRING='TPM_FFTW:WISDOM_TREE:HDR')
+      IF (IWORDS_LOC > 0) THEN
+        CALL MPL_SEND(IBUF_LOC(1:IWORDS_LOC), KDEST=IPEER_1B, &
+          & KTAG=ITAG_BUF, CDSTRING='TPM_FFTW:WISDOM_TREE:BUF')
+      ENDIF
+      LLACTIVE = .FALSE.
+    ENDIF
+    ISTRIDE = ISTRIDE * 2
   ENDDO
-ENDIF
-
-! Pack bytes densely into JPIM words: 4 bytes/word, little-endian.
-! Padding beyond ILEN_LOC is zero-initialised. IBPW-byte round-up is
-! safe because the receiver uses ILENS(JR) (byte count) to bound the
-! unpack loop.
-IWORDS_LOC = (ILEN_LOC + IBPW - 1) / IBPW
-ALLOCATE(IBUF_LOC(MAX(IWORDS_LOC, 1)))
-IBUF_LOC(:) = 0
-DO JJ = 1, ILEN_LOC
-  IWORD = (JJ - 1) / IBPW + 1
-  IBPOS = MOD(JJ - 1, IBPW)
-  IBUF_LOC(IWORD) = IOR(IBUF_LOC(IWORD), &
-    & ISHFT(IAND(ICHAR(ZLOC(JJ)), 255), 8 * IBPOS))
-ENDDO
-
-! clean up malloc'd FFTW string
-IF (C_ASSOCIATED(IPTR)) CALL C_FREE(IPTR)
-NULLIFY(ZLOC)
-
-IF (LLMPI) THEN
-  ! Gather per-rank byte lengths so rank 1 can size its receive buffer
-  ! and every rank can compute word-count displacements.
-  ALLOCATE(ILENS(MPL_NUMPROC))
-  ALLOCATE(IONES(MPL_NUMPROC))
-  IONES(:) = 1
-  CALL MPL_ALLGATHERV([ILEN_LOC], ILENS, IONES, KSENDCOUNT=1, &
-    & CDSTRING='TPM_FFTW:EXPORT_WISDOM:LENS')
-  DEALLOCATE(IONES)
-
-  ! Word counts and displacements for the packed payload.
-  ALLOCATE(IWORDS(MPL_NUMPROC))
-  ALLOCATE(IDISPLS(MPL_NUMPROC))
-  DO JR = 1, MPL_NUMPROC
-    IWORDS(JR) = (ILENS(JR) + IBPW - 1) / IBPW
-  ENDDO
-  IDISPLS(1) = 0
-  DO JR = 2, MPL_NUMPROC
-    IDISPLS(JR) = IDISPLS(JR-1) + IWORDS(JR-1)
-  ENDDO
-  ITOT_WORDS = IDISPLS(MPL_NUMPROC) + IWORDS(MPL_NUMPROC)
-
-  ! gather the packed wisdom to rank 1
-  IF (LLROOT) THEN
-    ALLOCATE(IBUF_ALL(MAX(ITOT_WORDS, 1)))
-    IBUF_ALL(:) = 0
-    CALL MPL_GATHERV(IBUF_LOC(1:IWORDS_LOC), KROOT=1, KRECVBUF=IBUF_ALL, &
-      & KRECVCOUNTS=IWORDS, KSENDCOUNT=IWORDS_LOC, KRECVDISPL=IDISPLS, &
-      & CDSTRING='TPM_FFTW:EXPORT_WISDOM')
-  ELSE
-    ALLOCATE(IBUF_ALL(1))
-    CALL MPL_GATHERV(IBUF_LOC(1:IWORDS_LOC), KROOT=1, &
-      & KSENDCOUNT=IWORDS_LOC, &
-      & CDSTRING='TPM_FFTW:EXPORT_WISDOM')
-    DEALLOCATE(IBUF_ALL)
-  ENDIF
 ENDIF
 
 DEALLOCATE(IBUF_LOC)
 
-! Unpack each rank's wisdom (bytes recovered from packed words) and
-! import into rank 1's planner
+! Rank 1's planner now holds the accumulated union; write it out.
 IF (LLROOT) THEN
-  IF (LLMPI) THEN
-    DO JR = 1, MPL_NUMPROC
-      IF (JR == 1) CYCLE          ! rank 1's wisdom
-      IL = ILENS(JR)
-      IF (IL <= 0) CYCLE
-      IOFF = IDISPLS(JR)          ! word offset into IBUF_ALL
-      ALLOCATE(ZRANK(IL + 1))
-      DO JJ = 1, IL
-        IWORD = (JJ - 1) / IBPW + 1
-        IBPOS = MOD(JJ - 1, IBPW)
-        IBYTE = IAND(ISHFT(IBUF_ALL(IOFF + IWORD), -8 * IBPOS), 255)
-        ZRANK(JJ) = ACHAR(IBYTE)
-      ENDDO
-      ZRANK(IL + 1) = C_NULL_CHAR
-      IF (JPRB == JPRD) THEN
-        IRET = FFTW_IMPORT_WISDOM_FROM_STRING(ZRANK)
-      ELSE
-        IRET = FFTWF_IMPORT_WISDOM_FROM_STRING(ZRANK)
-      ENDIF
-      IF (IRET /= 1) THEN
-        WRITE(0,'(A,I6)') 'TPM_FFTW: WARNING failed to merge wisdom from rank ', JR
-      ENDIF
-      DEALLOCATE(ZRANK)
-    ENDDO
-    DEALLOCATE(IBUF_ALL)
-    DEALLOCATE(ILENS)
-    DEALLOCATE(IWORDS)
-    DEALLOCATE(IDISPLS)
-  ENDIF
-
   CALL STR_TO_CSTR(ZPATH, ZCPATH)
   IF (JPRB == JPRD) THEN
     IRET = FFTW_EXPORT_WISDOM_TO_FILENAME(ZCPATH)
@@ -325,10 +354,6 @@ IF (LLROOT) THEN
     WRITE(0,'(A,A)') 'TPM_FFTW: WARNING failed to export FFTW wisdom to ', &
       & TRIM(ZPATH)
   ENDIF
-ELSE
-  IF (ALLOCATED(ILENS))   DEALLOCATE(ILENS)
-  IF (ALLOCATED(IWORDS))  DEALLOCATE(IWORDS)
-  IF (ALLOCATED(IDISPLS)) DEALLOCATE(IDISPLS)
 ENDIF
 
 END SUBROUTINE EXPORT_FFTW_WISDOM
