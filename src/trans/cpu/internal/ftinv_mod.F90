@@ -10,7 +10,7 @@
 
 MODULE FTINV_MOD
 CONTAINS
-SUBROUTINE FTINV(PREEL,KFIELDS,KGL)
+SUBROUTINE FTINV(PREEL,KFIELDS,KGL,KPLAN)
 
 !**** *FTINV - Inverse Fourier transform
 
@@ -23,6 +23,8 @@ SUBROUTINE FTINV(PREEL,KFIELDS,KGL)
 
 !        Explicit arguments :  PREEL   - Fourier/grid-point array
 !        --------------------  KFIELDS - number of fields
+!                              KGL     - latitude index
+!                              KPLAN   - optional pre-resolved FFTW plan
 
 !     Method.
 !     -------
@@ -45,7 +47,7 @@ SUBROUTINE FTINV(PREEL,KFIELDS,KGL)
 !        R. El Khatib  08-Jun-2023 LALL_FFTW for better flexibility
 !     ------------------------------------------------------------------
 
-USE PARKIND1  ,ONLY : JPIM, JPRB
+USE PARKIND1  ,ONLY : JPIM, JPIB, JPRB
 
 USE TPM_DISTR       ,ONLY : D, MYSETW
 USE TPM_GEOMETRY    ,ONLY : G
@@ -56,6 +58,7 @@ IMPLICIT NONE
 
 INTEGER(KIND=JPIM),INTENT(IN) :: KFIELDS,KGL
 REAL(KIND=JPRB), INTENT(INOUT)  :: PREEL(:,:)
+INTEGER(KIND=JPIB),INTENT(IN), OPTIONAL :: KPLAN
 
 INTEGER(KIND=JPIM) :: IGLG,IST,ILEN,JJ,JF,IST1
 INTEGER(KIND=JPIM) :: IOFF,IRLEN,ICLEN, ITYPE
@@ -80,7 +83,11 @@ IF (G%NLOEN(IGLG)>1) THEN
   IRLEN=G%NLOEN(IGLG)+R%NNOEXTZL
   ICLEN=(IRLEN/2+1)*2
 
-  CALL EXEC_FFTW(ITYPE,IRLEN,ICLEN,IOFF,KFIELDS,TW%LALL_FFTW,PREEL)
+  IF (PRESENT(KPLAN)) THEN
+    CALL EXEC_FFTW(ITYPE,IRLEN,ICLEN,IOFF,KFIELDS,TW%LALL_FFTW,PREEL,KPLAN)
+  ELSE
+    CALL EXEC_FFTW(ITYPE,IRLEN,ICLEN,IOFF,KFIELDS,TW%LALL_FFTW,PREEL)
+  ENDIF
 ENDIF
 
 !     ------------------------------------------------------------------

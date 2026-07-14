@@ -70,6 +70,8 @@ DO JM = 0, G%NMEN(IGLG)
   ISTA = (D%NSTAGT0B(D%MSTABF(IPROC)) + D%NPNTGTB0(JM,KGL)) * 2 * KFIELDS
 
   ! Copy all fields from FFT work array to m-to-l transposition buffer
+  ! SIMD-vectorise the per-field copy
+  !$OMP SIMD
   DO JF = 1, KFIELDS
     FOUBUF(ISTA+2*JF-1) = PREEL(JF,IR)
     FOUBUF(ISTA+2*JF)   = PREEL(JF,II)
