@@ -182,12 +182,19 @@ CHARACTER(KIND=C_CHAR), ALLOCATABLE :: ZCPATH(:)
 CHARACTER(KIND=C_CHAR), POINTER     :: ZLOC(:)
 CHARACTER(KIND=C_CHAR), ALLOCATABLE, TARGET :: ZRANK(:)
 INTEGER(KIND=JPIM),     ALLOCATABLE :: IBUF_LOC(:), IBUF_ALL(:)
-INTEGER(KIND=JPIM),     ALLOCATABLE :: ILENS(:), IDISPLS(:), IONES(:)
-INTEGER(KIND=JPIM) :: ISTAT, ILEN_LOC, ITOT, JR, JJ, IHUGE
+INTEGER(KIND=JPIM),     ALLOCATABLE :: ILENS(:), IWORDS(:), IDISPLS(:), IONES(:)
+INTEGER(KIND=JPIM) :: ISTAT, ILEN_LOC, IWORDS_LOC, ITOT_WORDS
+INTEGER(KIND=JPIM) :: JR, JJ, IHUGE, IWORD, IBPOS, IBYTE
 INTEGER(KIND=JPIM) :: IOFF, IL
 INTEGER(C_INT)     :: IRET
 TYPE(C_PTR)        :: IPTR
 LOGICAL            :: LLROOT, LLMPI
+! Dense byte packing: 4 bytes per JPIM word (previously 1 byte per JPIM).
+! Cuts the gather payload by 4x, giving 4x more headroom before ITOT_WORDS
+! or the MPI count/displ arguments (INTEGER(JPIM)) overflow at large
+! NPROC. The remaining O(NPROC) scaling is addressed in a follow-up
+! commit (hierarchical union reduction).
+INTEGER(KIND=JPIM), PARAMETER :: IBPW = 4  ! bytes per JPIM word
 
 ! this does nothing if ECTRANS_FFTW_WISDOM environment variable not set
 CALL WISDOM_FILENAME(ZPATH, ISTAT)
@@ -215,12 +222,18 @@ IF (C_ASSOCIATED(IPTR)) THEN
   ENDDO
 ENDIF
 
-! Copy bytes into a JPIM INTEGER array to avoid MPI wierdness 
-! with CHARACTERS 
-ALLOCATE(IBUF_LOC(MAX(ILEN_LOC, 1)))
+! Pack bytes densely into JPIM words: 4 bytes/word, little-endian.
+! Padding beyond ILEN_LOC is zero-initialised. IBPW-byte round-up is
+! safe because the receiver uses ILENS(JR) (byte count) to bound the
+! unpack loop.
+IWORDS_LOC = (ILEN_LOC + IBPW - 1) / IBPW
+ALLOCATE(IBUF_LOC(MAX(IWORDS_LOC, 1)))
 IBUF_LOC(:) = 0
 DO JJ = 1, ILEN_LOC
-  IBUF_LOC(JJ) = ICHAR(ZLOC(JJ))
+  IWORD = (JJ - 1) / IBPW + 1
+  IBPOS = MOD(JJ - 1, IBPW)
+  IBUF_LOC(IWORD) = IOR(IBUF_LOC(IWORD), &
+    & ISHFT(IAND(ICHAR(ZLOC(JJ)), 255), 8 * IBPOS))
 ENDDO
 
 ! clean up malloc'd FFTW string
@@ -228,9 +241,8 @@ IF (C_ASSOCIATED(IPTR)) CALL C_FREE(IPTR)
 NULLIFY(ZLOC)
 
 IF (LLMPI) THEN
-  ! gather per-rank lengths so rank 1 can size its receive
-  ! buffer and every rank can compute displacements
-  ! extra bookkeeping.
+  ! Gather per-rank byte lengths so rank 1 can size its receive buffer
+  ! and every rank can compute word-count displacements.
   ALLOCATE(ILENS(MPL_NUMPROC))
   ALLOCATE(IONES(MPL_NUMPROC))
   IONES(:) = 1
@@ -238,24 +250,29 @@ IF (LLMPI) THEN
     & CDSTRING='TPM_FFTW:EXPORT_WISDOM:LENS')
   DEALLOCATE(IONES)
 
-  ITOT = SUM(ILENS)
+  ! Word counts and displacements for the packed payload.
+  ALLOCATE(IWORDS(MPL_NUMPROC))
   ALLOCATE(IDISPLS(MPL_NUMPROC))
+  DO JR = 1, MPL_NUMPROC
+    IWORDS(JR) = (ILENS(JR) + IBPW - 1) / IBPW
+  ENDDO
   IDISPLS(1) = 0
   DO JR = 2, MPL_NUMPROC
-    IDISPLS(JR) = IDISPLS(JR-1) + ILENS(JR-1)
+    IDISPLS(JR) = IDISPLS(JR-1) + IWORDS(JR-1)
   ENDDO
+  ITOT_WORDS = IDISPLS(MPL_NUMPROC) + IWORDS(MPL_NUMPROC)
 
-  ! gather the wisdom rank 1
+  ! gather the packed wisdom to rank 1
   IF (LLROOT) THEN
-    ALLOCATE(IBUF_ALL(MAX(ITOT, 1)))
+    ALLOCATE(IBUF_ALL(MAX(ITOT_WORDS, 1)))
     IBUF_ALL(:) = 0
-    CALL MPL_GATHERV(IBUF_LOC(1:ILEN_LOC), KROOT=1, KRECVBUF=IBUF_ALL, &
-      & KRECVCOUNTS=ILENS, KSENDCOUNT=ILEN_LOC, KRECVDISPL=IDISPLS, &
+    CALL MPL_GATHERV(IBUF_LOC(1:IWORDS_LOC), KROOT=1, KRECVBUF=IBUF_ALL, &
+      & KRECVCOUNTS=IWORDS, KSENDCOUNT=IWORDS_LOC, KRECVDISPL=IDISPLS, &
       & CDSTRING='TPM_FFTW:EXPORT_WISDOM')
   ELSE
     ALLOCATE(IBUF_ALL(1))
-    CALL MPL_GATHERV(IBUF_LOC(1:ILEN_LOC), KROOT=1, &
-      & KSENDCOUNT=ILEN_LOC, &
+    CALL MPL_GATHERV(IBUF_LOC(1:IWORDS_LOC), KROOT=1, &
+      & KSENDCOUNT=IWORDS_LOC, &
       & CDSTRING='TPM_FFTW:EXPORT_WISDOM')
     DEALLOCATE(IBUF_ALL)
   ENDIF
@@ -263,17 +280,21 @@ ENDIF
 
 DEALLOCATE(IBUF_LOC)
 
-! read each rank's wisdom into rank 1 wisdom/planner
+! Unpack each rank's wisdom (bytes recovered from packed words) and
+! import into rank 1's planner
 IF (LLROOT) THEN
   IF (LLMPI) THEN
     DO JR = 1, MPL_NUMPROC
       IF (JR == 1) CYCLE          ! rank 1's wisdom
       IL = ILENS(JR)
       IF (IL <= 0) CYCLE
-      IOFF = IDISPLS(JR)
+      IOFF = IDISPLS(JR)          ! word offset into IBUF_ALL
       ALLOCATE(ZRANK(IL + 1))
       DO JJ = 1, IL
-        ZRANK(JJ) = ACHAR(IBUF_ALL(IOFF + JJ))
+        IWORD = (JJ - 1) / IBPW + 1
+        IBPOS = MOD(JJ - 1, IBPW)
+        IBYTE = IAND(ISHFT(IBUF_ALL(IOFF + IWORD), -8 * IBPOS), 255)
+        ZRANK(JJ) = ACHAR(IBYTE)
       ENDDO
       ZRANK(IL + 1) = C_NULL_CHAR
       IF (JPRB == JPRD) THEN
@@ -288,6 +309,7 @@ IF (LLROOT) THEN
     ENDDO
     DEALLOCATE(IBUF_ALL)
     DEALLOCATE(ILENS)
+    DEALLOCATE(IWORDS)
     DEALLOCATE(IDISPLS)
   ENDIF
 
@@ -305,6 +327,7 @@ IF (LLROOT) THEN
   ENDIF
 ELSE
   IF (ALLOCATED(ILENS))   DEALLOCATE(ILENS)
+  IF (ALLOCATED(IWORDS))  DEALLOCATE(IWORDS)
   IF (ALLOCATED(IDISPLS)) DEALLOCATE(IDISPLS)
 ENDIF
 
