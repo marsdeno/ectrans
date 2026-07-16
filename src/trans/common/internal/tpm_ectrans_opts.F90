@@ -23,7 +23,7 @@ IMPLICIT NONE
 
 PRIVATE
 PUBLIC :: INIT_ECTRANS_OPTS
-PUBLIC :: LUSE_OPT1, LUSE_OPT2, LUSE_OPT3, LUSE_OPT4, LUSE_OPT5
+PUBLIC :: LUSE_OPT1, LUSE_OPT2, LUSE_OPT3, LUSE_OPT4, LUSE_OPT5, LUSE_OPT6
 
 SAVE
 
@@ -45,6 +45,14 @@ LOGICAL :: LUSE_OPT4 = .TRUE.
 ! Enable by setting env variable ECTRANS_ENABLE_OPT5=1
 LOGICAL :: LUSE_OPT5    = .FALSE.
 
+! FTDIR (ftdir_ctl_mod): fused FFT + FOURIER_OUT (EXEC_FFTW_R2C_TO_FOUBUF).
+! Skips one PREEL write + one PREEL read + a zero-fill of dead PREEL columns
+! by unpacking FFT output straight from per-thread ZFFT into FOUBUF_IN.
+! Default .FALSE. because the batched block phase (shared with OPT5)
+! is not bit-identical to the KLOT=1 baseline
+! Enable with ECTRANS_ENABLE_OPT6=1.
+LOGICAL :: LUSE_OPT6   = .FALSE.
+
 LOGICAL, PRIVATE :: LINITIALISED = .FALSE.
 
 CONTAINS
@@ -59,11 +67,12 @@ IF (LINITIALISED) RETURN
 
 LUSE_OPT1  = .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT1')
 LUSE_OPT2  = .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT2')
-! Opt3 is only wired inside the LUSE_OPT2 branch of trltog_mod,
-! so disabling Opt2 implicitly disables Opt3 too.
+! OPT3 is only wired inside the LUSE_OPT2 branch of trltog_mod,
+! so disabling OPT2 implicitly disables OPT3 too.
 LUSE_OPT3 = LUSE_OPT2 .AND. .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT3')
 LUSE_OPT4 = .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT4')
 LUSE_OPT5   = ENV_ENABLE('ECTRANS_ENABLE_OPT5')
+LUSE_OPT6  = ENV_ENABLE('ECTRANS_ENABLE_OPT6')
 
 IF (NPRINTLEV > 0) THEN
   WRITE(NOUT,'(A)')       '=== ecTrans CPU optimisation flags ==='
@@ -77,6 +86,8 @@ IF (NPRINTLEV > 0) THEN
    &                      '   (ECTRANS_DISABLE_OPT4=1 to disable)'
   WRITE(NOUT,'(A,L1,A)')  '  LUSE_OPT5   (FFT KLOT=N_FFT_BLK block)    = ', LUSE_OPT5, &
    &                      '   (ECTRANS_ENABLE_OPT5=1 to enable; NOT bit-id)'
+  WRITE(NOUT,'(A,L1,A)')  '  LUSE_OPT6  (fused FTDIR->FOUBUF)          = ', LUSE_OPT6, &
+   &                      '   (ECTRANS_ENABLE_OPT6=1 to enable; NOT bit-id)'
 ENDIF
 
 LINITIALISED = .TRUE.

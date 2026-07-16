@@ -70,8 +70,9 @@ USE TPM_GEN   ,ONLY : NSTACK_MEMORY_TR
 USE TPM_TRANS       ,ONLY : FOUBUF_IN
 USE TPM_DISTR       ,ONLY : D, MYPROC, MYSETW, NPROC
 USE TPM_GEOMETRY    ,ONLY : G
+USE TPM_ECTRANS_OPTS,ONLY : LUSE_OPT6
 USE TPM_DIM         ,ONLY : R
-USE TPM_FFTW        ,ONLY : TW, CREATE_PLAN_FFTW
+USE TPM_FFTW        ,ONLY : TW, CREATE_PLAN_FFTW, EXEC_FFTW_R2C_TO_FOUBUF, N_FFT_BLK
 
 USE TRGTOL_MOD      ,ONLY : TRGTOL
 USE FOURIER_OUT_MOD ,ONLY : FOURIER_OUT
@@ -105,6 +106,8 @@ INTEGER(KIND=JPIM) :: IVSETSC(KF_SCALARS_G)
 INTEGER(KIND=JPIM) :: IVSET(KF_GP)
 INTEGER(KIND=JPIM) :: IFGP2,IFGP3A,IFGP3B,IOFF,J3
 INTEGER(KIND=JPIM) :: IGLG,IRLEN,IPLAN_KLOT
+INTEGER(KIND=JPIM) :: ICLEN,IKOFF  ! OPT6: fused-FFT args
+INTEGER(KIND=JPIB) :: IDUMMY_PLAN  ! OPT6: for warming plan cache
 INTEGER(KIND=JPIM) :: INEED, J  ! persistent ZGTF buffer sizing
 INTEGER(KIND=JPIB),ALLOCATABLE :: IPLAN_FFTW(:)
 
@@ -206,17 +209,40 @@ IF (KF_FS > 0) THEN
     IRLEN = G%NLOEN(IGLG) + R%NNOEXTZL
     IF (G%NLOEN(IGLG) > 1) THEN
       CALL CREATE_PLAN_FFTW(IPLAN_FFTW(JGL), -1, IRLEN, IPLAN_KLOT)
+      ! OPT6: warm the plan cache serially for the two KLOTs used inside
+      ! EXEC_FFTW_R2C_TO_FOUBUF (block + tail). FFTW plan creation is not
+      ! thread-safe; creating them here avoids races in the parallel loop.
+      IF (LUSE_OPT6) THEN
+        IF (KF_FS >= N_FFT_BLK) THEN
+          CALL CREATE_PLAN_FFTW(IDUMMY_PLAN, -1, IRLEN, N_FFT_BLK)
+        ENDIF
+        IF (MOD(KF_FS, N_FFT_BLK) /= 0 .OR. KF_FS < N_FFT_BLK) THEN
+          CALL CREATE_PLAN_FFTW(IDUMMY_PLAN, -1, IRLEN, 1_JPIM)
+        ENDIF
+      ENDIF
     ENDIF
   ENDDO
 
   ! Loop over latitudes
-  !$OMP PARALLEL DO SCHEDULE(DYNAMIC,1) PRIVATE(JGL)
+  ! OPT6 : fused FFT + FOURIER_OUT writing straight into FOUBUF_IN, replacing
+  ! the FTDIR + FOURIER_OUT split when NLOEN>1.   NLOEN==1 latitudes fall back
+  ! to the split pipeline. 
+  ! Original code unchanged when off (default)
+  !$OMP PARALLEL DO SCHEDULE(DYNAMIC,1) PRIVATE(JGL, IGLG, IRLEN, ICLEN, IKOFF)
   DO JGL = 1, D%NDGL_FS
-    ! Fourier transform
-    CALL FTDIR(ZGTF, KF_FS, JGL, IPLAN_FFTW(JGL))
+    IGLG = D%NPTRLS(MYSETW) + JGL - 1
+    IF (LUSE_OPT6 .AND. G%NLOEN(IGLG) > 1) THEN
+      IRLEN = G%NLOEN(IGLG) + R%NNOEXTZL
+      ICLEN = (IRLEN/2 + 1) * 2
+      IKOFF = D%NSTAGTF(JGL) + 1
+      CALL EXEC_FFTW_R2C_TO_FOUBUF(IRLEN, ICLEN, IKOFF, KF_FS, ZGTF, JGL)
+    ELSE
+      ! Fourier transform
+      CALL FTDIR(ZGTF, KF_FS, JGL, IPLAN_FFTW(JGL))
 
-    ! Save Fourier data in FOUBUF_IN
-    CALL FOURIER_OUT(ZGTF, KF_FS, JGL)
+      ! Save Fourier data in FOUBUF_IN
+      CALL FOURIER_OUT(ZGTF, KF_FS, JGL)
+    ENDIF
   ENDDO
   !$OMP END PARALLEL DO
 

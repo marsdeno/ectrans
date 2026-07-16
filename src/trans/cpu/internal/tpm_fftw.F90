@@ -42,7 +42,7 @@ SAVE
 
 PRIVATE
 PUBLIC CREATE_PLAN_FFTW, DESTROY_PLAN_FFTW, DESTROY_PLANS_FFTW, INIT_PLANS_FFTW, &
-      & FFTW_RESOL, TW, EXEC_FFTW, EXEC_EFFTW
+      & FFTW_RESOL, TW, EXEC_FFTW, EXEC_EFFTW, EXEC_FFTW_R2C_TO_FOUBUF, N_FFT_BLK
 
 TYPE FFTW_TYPE
   INTEGER(KIND=JPIM),ALLOCATABLE :: N_PLANS(:)
@@ -858,6 +858,138 @@ ENDIF
 
 IF (LHOOK) CALL DR_HOOK('EXEC_FFTW',1,ZHOOK_HANDLE)
 END SUBROUTINE EXEC_FFTW
+
+! ------------------------------------------------------------------
+! OPT6: fused KTYPE=-1 (real-to-complex) FFT + FOURIER_OUT.
+!
+! Replaces the two-step sequence
+!   CALL FTDIR(ZGTF, KFIELDS, KGL, KPLAN)          ! EXEC_FFTW(-1,...) + zero-fill
+!   CALL FOURIER_OUT(ZGTF, KFIELDS, KGL)           ! ZGTF -> FOUBUF_IN
+! with a single subroutine that skips the intermediate write back to PREEL
+! and the following read of PREEL in FOURIER_OUT: the FFT output is unpacked
+! straight from the per-thread ZFFT scratch buffer into FOUBUF_IN.
+!
+! Additional savings versus the split pipeline:
+!   - No PREEL write of the KCLEN FFT output columns (unused after the loop).
+!   - No PREEL zero-fill of columns 2*NMEN+3..NLOEN+3 (dead in FTDIR L83-91;
+!     downstream code reads only FOUBUF_IN, never PREEL, after the FTDIR loop).
+!   - No PREEL read in FOURIER_OUT (data comes directly from ZFFT which is
+!     still hot in per-thread L1/L2 after the FFTW batched exec).
+!
+! Restrictions vs. FTDIR + FOURIER_OUT:
+!   - Only handles KTYPE=-1 (r2c) with the LALL_FFTW=.FALSE. path.
+!   - Caller must guard with G%NLOEN(IGLG) > 1 and fall back to the split
+!     pipeline for NLOEN==1 (pole-only latitudes still need FOURIER_OUT to
+!     copy the DC part out).
+!   - default off: not bit-identical to the original split code path
+!
+! Layout mirrors EXEC_FFTW's block+tail structure:
+!   Block phase: KLOT=N_FFT_BLK batched FFTW plan; pack (JJ outer, JB inner)
+!                for stride-1 PREEL reads; unpack (JM outer, JB inner) into
+!                FOUBUF_IN using the FOURIER_OUT index scheme, one
+!                cache-line-width block at a time.
+!   Tail phase:  MOD(KFIELDS, N_FFT_BLK) fields via KLOT=1 plan, per-field
+!                unpack (JF outer, JM inner).
+!
+SUBROUTINE EXEC_FFTW_R2C_TO_FOUBUF(KRLEN, KCLEN, KOFF, KFIELDS, PREEL, KGL)
+
+USE TPM_TRANS,    ONLY : FOUBUF_IN
+USE TPM_DISTR,    ONLY : D, MYSETW
+USE TPM_GEOMETRY, ONLY : G
+
+INTEGER(KIND=JPIM), INTENT(IN)  :: KRLEN
+INTEGER(KIND=JPIM), INTENT(IN)  :: KCLEN
+INTEGER(KIND=JPIM), INTENT(IN)  :: KOFF
+INTEGER(KIND=JPIM), INTENT(IN)  :: KFIELDS
+REAL(KIND=JPRB),    INTENT(IN)  :: PREEL(:,:)
+INTEGER(KIND=JPIM), INTENT(IN)  :: KGL
+
+REAL(KIND=JPRB), POINTER :: ZFFT(:,:)
+REAL(KIND=JPRB), POINTER :: ZFFT1(:)
+TYPE(C_PTR) :: ZFFTP, ZFFT1P
+
+INTEGER(KIND=JPIM) :: JJ, JF, JB, JM, IB, JFBASE, INBLK, ILAST
+INTEGER(KIND=JPIM) :: IGLG, IPROC, ISTA, INMEN
+INTEGER(KIND=JPIB) :: IPLAN_R2C_BLK, IPLAN_R2C1
+REAL(KIND=JPRB) :: ZINV
+REAL(KIND=JPHOOK) :: ZHOOK_HANDLE, ZHOOK_HANDLE2
+
+IF (LHOOK) CALL DR_HOOK('EXEC_FFTW_R2C_TO_FOUBUF',0,ZHOOK_HANDLE)
+
+ZINV = 1.0_JPRB / REAL(KRLEN, JPRB)
+
+! Latitude-dependent constants for FOUBUF_IN offset (mirrors FOURIER_OUT).
+IGLG  = D%NPTRLS(MYSETW) + KGL - 1
+INMEN = G%NMEN(IGLG)
+
+! --- Block phase --------------------------------------------------------
+IF (KFIELDS >= N_FFT_BLK) THEN
+  CALL CREATE_PLAN_FFTW(IPLAN_R2C_BLK, -1_JPIM, KRLEN, N_FFT_BLK)
+  CALL ENSURE_FFT_BUFFER(INT(KCLEN/2*N_FFT_BLK, C_SIZE_T), ZFFTP)
+  CALL C_F_POINTER(ZFFTP, ZFFT, [KCLEN, N_FFT_BLK])
+  INBLK = KFIELDS / N_FFT_BLK
+  ILAST = INBLK * N_FFT_BLK
+  DO IB = 1, INBLK
+    JFBASE = (IB-1)*N_FFT_BLK + 1
+    ! Pack: JJ outer, JB inner -> stride-1 PREEL reads (matches EXEC_FFTW Opt5).
+    DO JJ = 1, KRLEN
+      !$OMP SIMD
+      DO JB = 1, N_FFT_BLK
+        ZFFT(JJ, JB) = PREEL(JFBASE+JB-1, KOFF+JJ-1)
+      ENDDO
+    ENDDO
+    IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_R2C',0,ZHOOK_HANDLE2)
+    IF (JPRB == JPRD) THEN
+      CALL DFFTW_EXECUTE_DFT_R2C(IPLAN_R2C_BLK, ZFFT, ZFFT)
+    ELSE
+      CALL SFFTW_EXECUTE_DFT_R2C(IPLAN_R2C_BLK, ZFFT, ZFFT)
+    END IF
+    IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_R2C',1,ZHOOK_HANDLE2)
+    ! Fused unpack: JM outer, JB inner. ZFFT reads are stride KCLEN in JB (hot
+    ! per-thread L1/L2 scratch); FOUBUF_IN writes are stride 2*KFIELDS across
+    ! blocks but stride-2 within a block (same access shape as FOURIER_OUT).
+    DO JM = 0, INMEN
+      IPROC = D%NPROCM(JM)
+      ISTA  = (D%NSTAGT1B(D%MSTABF(IPROC)) + D%NPNTGTB0(JM,KGL)) * 2 * KFIELDS
+      !$OMP SIMD
+      DO JB = 1, N_FFT_BLK
+        FOUBUF_IN(ISTA + 2*(JFBASE+JB-1) - 1) = ZFFT(2*JM+1, JB) * ZINV
+        FOUBUF_IN(ISTA + 2*(JFBASE+JB-1))     = ZFFT(2*JM+2, JB) * ZINV
+      ENDDO
+    ENDDO
+  ENDDO
+ELSE
+  INBLK = 0
+  ILAST = 0
+ENDIF
+
+! --- Tail phase ---------------------------------------------------------
+IF (ILAST < KFIELDS) THEN
+  CALL CREATE_PLAN_FFTW(IPLAN_R2C1, -1_JPIM, KRLEN, 1_JPIM)
+  CALL ENSURE_FFT_BUFFER(INT(KCLEN/2, C_SIZE_T), ZFFT1P)
+  CALL C_F_POINTER(ZFFT1P, ZFFT1, [KCLEN])
+  DO JF = ILAST+1, KFIELDS
+    DO JJ = 1, KRLEN
+      ZFFT1(JJ) = PREEL(JF, KOFF+JJ-1)
+    ENDDO
+    IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_R2C',0,ZHOOK_HANDLE2)
+    IF (JPRB == JPRD) THEN
+      CALL DFFTW_EXECUTE_DFT_R2C(IPLAN_R2C1, ZFFT1, ZFFT1)
+    ELSE
+      CALL SFFTW_EXECUTE_DFT_R2C(IPLAN_R2C1, ZFFT1, ZFFT1)
+    END IF
+    IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_R2C',1,ZHOOK_HANDLE2)
+    DO JM = 0, INMEN
+      IPROC = D%NPROCM(JM)
+      ISTA  = (D%NSTAGT1B(D%MSTABF(IPROC)) + D%NPNTGTB0(JM,KGL)) * 2 * KFIELDS
+      FOUBUF_IN(ISTA + 2*JF - 1) = ZFFT1(2*JM+1) * ZINV
+      FOUBUF_IN(ISTA + 2*JF)     = ZFFT1(2*JM+2) * ZINV
+    ENDDO
+  ENDDO
+ENDIF
+
+IF (LHOOK) CALL DR_HOOK('EXEC_FFTW_R2C_TO_FOUBUF',1,ZHOOK_HANDLE)
+END SUBROUTINE EXEC_FFTW_R2C_TO_FOUBUF
 
 SUBROUTINE EXEC_EFFTW(KTYPE,KRLEN,KCLEN,KOFF,KFIELDS,LD_ALL,PREEL)
 
