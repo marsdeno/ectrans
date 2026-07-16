@@ -23,19 +23,27 @@ IMPLICIT NONE
 
 PRIVATE
 PUBLIC :: INIT_ECTRANS_OPTS
-PUBLIC :: LUSE_OPT1, LUSE_OPT2, LUSE_OPT3, LUSE_OPT4
+PUBLIC :: LUSE_OPT1, LUSE_OPT2, LUSE_OPT3, LUSE_OPT4, LUSE_OPT5
 
 SAVE
 
 ! FTINV: fused FOURIER_IN + FSC per-JM copy (FOURIER_IN_MOD / FTINV_CTL_MOD).
 LOGICAL :: LUSE_OPT1  = .TRUE.
+
 ! TRLTOG: single MPL_ALLTOALLV + fused self-copy/pack (TRLTOG_MOD).
 LOGICAL :: LUSE_OPT2  = .TRUE.
+
 ! TRLTOG: non-blocking alltoallv overlapping the deferred self-copy.
 ! Only meaningful when LUSE_OPT2 is also .TRUE.; forced OFF otherwise.
 LOGICAL :: LUSE_OPT3 = .TRUE.
+
 ! LTINV: fused LEINV + ASRE1B (LEINV_ASRE_FUSED_MOD, called from LTINV_MOD).
 LOGICAL :: LUSE_OPT4 = .TRUE.
+
+! FFT (tpm_fftw EXEC_FFTW LD_ALL=FALSE): KLOT=N_FFT_BLK batched block phase.
+! Default .FALSE. because the batched FFTW plan is not bit-id with non-batched
+! Enable by setting env variable ECTRANS_ENABLE_OPT5=1
+LOGICAL :: LUSE_OPT5    = .FALSE.
 
 LOGICAL, PRIVATE :: LINITIALISED = .FALSE.
 
@@ -55,6 +63,7 @@ LUSE_OPT2  = .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT2')
 ! so disabling Opt2 implicitly disables Opt3 too.
 LUSE_OPT3 = LUSE_OPT2 .AND. .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT3')
 LUSE_OPT4 = .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT4')
+LUSE_OPT5   = ENV_ENABLE('ECTRANS_ENABLE_OPT5')
 
 IF (NPRINTLEV > 0) THEN
   WRITE(NOUT,'(A)')       '=== ecTrans CPU optimisation flags ==='
@@ -66,6 +75,8 @@ IF (NPRINTLEV > 0) THEN
    &                      '   (ECTRANS_DISABLE_OPT3=1 to disable)'
   WRITE(NOUT,'(A,L1,A)')  '  LUSE_OPT4 (fused LEINV+ASRE1B)          = ', LUSE_OPT4, &
    &                      '   (ECTRANS_DISABLE_OPT4=1 to disable)'
+  WRITE(NOUT,'(A,L1,A)')  '  LUSE_OPT5   (FFT KLOT=N_FFT_BLK block)    = ', LUSE_OPT5, &
+   &                      '   (ECTRANS_ENABLE_OPT5=1 to enable; NOT bit-id)'
 ENDIF
 
 LINITIALISED = .TRUE.
@@ -91,5 +102,25 @@ IF (ISTATUS == 0) THEN
 ENDIF
 
 END FUNCTION ENV_DISABLE
+
+! -----------------------------------------------------------------------
+
+LOGICAL FUNCTION ENV_ENABLE(CDNAME) RESULT(LLEN)
+
+! Return .TRUE. if env variable CDNAME is set to "1", .FALSE. otherwise
+! (including if env variable CDNAME is unset)
+
+CHARACTER(LEN=*), INTENT(IN) :: CDNAME
+
+CHARACTER(LEN=8) :: CLVAL
+INTEGER          :: ISTATUS
+
+LLEN = .FALSE.
+CALL GET_ENVIRONMENT_VARIABLE(CDNAME, CLVAL, STATUS=ISTATUS)
+IF (ISTATUS == 0) THEN
+  IF (TRIM(CLVAL) == '1') LLEN = .TRUE.
+ENDIF
+
+END FUNCTION ENV_ENABLE
 
 END MODULE TPM_ECTRANS_OPTS

@@ -21,11 +21,12 @@ MODULE TPM_FFTW
 
 USE, INTRINSIC :: ISO_C_BINDING
 
-USE PARKIND1   ,ONLY : JPIB, JPIM, JPRB, JPRD
-USE MPL_MODULE ,ONLY : MPL_MYRANK, MPL_RANK, MPL_NUMPROC, &
-  & MPL_SEND, MPL_RECV
-USE YOMHOOK    ,ONLY : LHOOK, DR_HOOK, JPHOOK
-USE OMP_LIB    ,ONLY : OMP_GET_MAX_THREADS, OMP_GET_THREAD_NUM
+USE PARKIND1        ,ONLY : JPIB, JPIM, JPRB, JPRD
+USE MPL_MODULE      ,ONLY : MPL_MYRANK, MPL_RANK, MPL_NUMPROC, &
+ &                          MPL_SEND, MPL_RECV
+USE YOMHOOK         ,ONLY : LHOOK, DR_HOOK, JPHOOK
+USE OMP_LIB         ,ONLY : OMP_GET_MAX_THREADS, OMP_GET_THREAD_NUM
+USE TPM_ECTRANS_OPTS,ONLY : LUSE_OPT5
 
 IMPLICIT NONE
 
@@ -47,7 +48,7 @@ TYPE FFTW_TYPE
   INTEGER(KIND=JPIM),ALLOCATABLE :: N_PLANS(:)
   TYPE(FFTW_PLAN),POINTER :: FFTW_PLANS(:) => NULL()
   INTEGER(KIND=JPIM) :: N_MAX=0         ! maximum number of latitudes
-  INTEGER(KIND=JPIM) :: N_MAX_PLANS=4   ! maximum number of plans for each active latitude
+  INTEGER(KIND=JPIM) :: N_MAX_PLANS=8   ! OPT5: increased to 8 to accommodate the KLOT=N_FFT_BLK batched plan
   LOGICAL            :: LALL_FFTW=.FALSE. ! T=do kfields ffts in one batch, F=do kfields ffts one at a time
 END TYPE FFTW_TYPE
 
@@ -95,6 +96,24 @@ INTERFACE
   END SUBROUTINE C_FREE
 END INTERFACE
 
+
+! OPT5: batched FFT block size for EXEC_FFTW LD_ALL=FALSE path. Fields are
+! processed in groups of N_FFT_BLK using a KLOT=N_FFT_BLK batched FFTW plan;
+! the tail (mod(KFIELDS,N_FFT_BLK)) fields fall back to the original per-field
+! KLOT=1 path. pack/unpack loops with block index innermost so that the
+! (JF, KOFF+JJ-1) reads/writes of PREEL are stride-1 in memory, and
+! !$OMP SIMD across the block dimension for contiguous loads / scatter stores 
+! into per-thread ZFFT_BLK scratch.
+!
+! NBLK=16 gets best cache line use, 16 SP fields = 64B i.e. whole cache line, 
+! and 2 lines in DP
+!
+! Per-thread ZFFT scratch is KCLEN * N_FFT_BLK * {4/8) ~= 64 KB (SP), bigger
+! than L1 but easy fit in L2
+!
+! Off by default, enable with ECTRANS_ENABLE_OPT5=1
+! Not bit-id to KLOT=1 because FFTW can pick a different algorithm for the batched plan.
+INTEGER(KIND=JPIM), PARAMETER :: N_FFT_BLK = 16_JPIM
 
 
 ! ------------------------------------------------------------------
@@ -643,8 +662,12 @@ REAL(KIND=JPRB), POINTER :: ZFFT1(:)
 TYPE(C_PTR) :: ZFFTP, ZFFT1P
 
 INTEGER(KIND=JPIM) :: JJ,JF
+! OPT5: block-phase locals
+INTEGER(KIND=JPIM) :: IB,JB,JFBASE,INBLK,ILAST
 
 INTEGER(KIND=JPIB) :: IPLAN_C2R, IPLAN_C2R1
+! OPT5: KLOT=N_FFT_BLK batched plan for the block phase.
+INTEGER(KIND=JPIB) :: IPLAN_C2R_BLK
 REAL(KIND=JPHOOK) :: ZHOOK_HANDLE, ZHOOK_HANDLE2
 REAL(KIND=JPRB) :: ZINV
 
@@ -656,8 +679,8 @@ IF ( (KTYPE /= -1) .AND. (KTYPE /=1) ) THEN
   CALL ABOR1('TPM_FFTW:EXEC_FFTW : WRONG VALUE KTYPE')
 ENDIF
 
-! Reciprocal computed once; only used on the LUSE_MEASURE branch, where
-! the bit-id wrt previous state already lost by using FFTW_MEASURE
+! Reciprocal computed once; only used on the LUSE_MEASURE branch, 
+! already non bit-id because of FFTW_MEASURE
 ZINV = 1.0_JPRB/REAL(KRLEN,JPRB)
 
 IF( LD_ALL )THEN
@@ -715,6 +738,74 @@ IF( LD_ALL )THEN
     ENDIF
   ENDIF
 ELSE
+  ! LD_ALL=FALSE: per-latitude FFT (LALL_FFTW=.FALSE. production path).
+  !
+  ! OPT5 : when enabled and KFIELDS >= N_FFT_BLK, process fields in 
+  ! groups of N_FFT_BLK with a KLOT=N_FFT_BLK batched FFTW plan; 
+  ! the pack/unpack put the block index inner so PREEL
+  ! reads/writes are stride-1 in the KFIELDS dimension. Fall back to
+  ! the original per-field KLOT=1 path for tail fields. 
+  ! When LUSE_OPT5 is off (default), INBLK=0 and ILAST=0, so the remainder
+  ! loop processes all fields exactly as before
+  IF (LUSE_OPT5 .AND. KFIELDS >= N_FFT_BLK) THEN
+    CALL CREATE_PLAN_FFTW(IPLAN_C2R_BLK, KTYPE, KRLEN, N_FFT_BLK)
+    CALL ENSURE_FFT_BUFFER(INT(KCLEN/2*N_FFT_BLK,C_SIZE_T), ZFFTP)
+    CALL C_F_POINTER(ZFFTP,ZFFT,[KCLEN,N_FFT_BLK])
+    INBLK = KFIELDS / N_FFT_BLK
+    ILAST = INBLK * N_FFT_BLK
+    IF (KTYPE==1) THEN
+      DO IB = 1, INBLK
+        JFBASE = (IB-1)*N_FFT_BLK + 1
+        DO JJ=1,KCLEN
+          !$OMP SIMD
+          DO JB=1,N_FFT_BLK
+            ZFFT(JJ,JB) = PREEL(JFBASE+JB-1,KOFF+JJ-1)
+          ENDDO
+        ENDDO
+        IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_C2R',0,ZHOOK_HANDLE2)
+        IF (JPRB == JPRD) THEN
+          CALL DFFTW_EXECUTE_DFT_C2R(IPLAN_C2R_BLK,ZFFT,ZFFT)
+        ELSE
+          CALL SFFTW_EXECUTE_DFT_C2R(IPLAN_C2R_BLK,ZFFT,ZFFT)
+        END IF
+        IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_C2R',1,ZHOOK_HANDLE2)
+        DO JJ=1,KRLEN
+          !$OMP SIMD
+          DO JB=1,N_FFT_BLK
+            PREEL(JFBASE+JB-1,KOFF+JJ-1) = ZFFT(JJ,JB)
+          ENDDO
+        ENDDO
+      ENDDO
+    ELSE
+      DO IB = 1, INBLK
+        JFBASE = (IB-1)*N_FFT_BLK + 1
+        DO JJ=1,KRLEN
+          !$OMP SIMD
+          DO JB=1,N_FFT_BLK
+            ZFFT(JJ,JB) = PREEL(JFBASE+JB-1,KOFF+JJ-1)
+          ENDDO
+        ENDDO
+        IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_R2C',0,ZHOOK_HANDLE2)
+        IF (JPRB == JPRD) THEN
+          CALL DFFTW_EXECUTE_DFT_R2C(IPLAN_C2R_BLK,ZFFT,ZFFT)
+        ELSE
+          CALL SFFTW_EXECUTE_DFT_R2C(IPLAN_C2R_BLK,ZFFT,ZFFT)
+        END IF
+        IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_R2C',1,ZHOOK_HANDLE2)
+        DO JJ=1,KCLEN
+          !$OMP SIMD
+          DO JB=1,N_FFT_BLK
+            PREEL(JFBASE+JB-1,KOFF+JJ-1) = ZFFT(JJ,JB) * ZINV
+          ENDDO
+        ENDDO
+      ENDDO
+    ENDIF
+  ELSE
+    INBLK = 0
+    ILAST = 0
+  ENDIF
+  ! Remainder / default per-field phase (processes fields ILAST+1..KFIELDS).
+  IF (ILAST < KFIELDS) THEN
   IF (PRESENT(KPLAN)) THEN
     IPLAN_C2R1 = KPLAN
   ELSE
@@ -724,7 +815,7 @@ ELSE
   CALL ENSURE_FFT_BUFFER(INT(KCLEN/2,C_SIZE_T), ZFFT1P)
   CALL C_F_POINTER(ZFFT1P,ZFFT1,[KCLEN])
   IF (KTYPE==1) THEN
-    DO JF=1,KFIELDS
+    DO JF=ILAST+1,KFIELDS
       DO JJ=1,KCLEN
         ZFFT1(JJ) =PREEL(JF,KOFF+JJ-1)
       ENDDO
@@ -740,7 +831,7 @@ ELSE
       ENDDO
     ENDDO
   ELSE
-    DO JF=1,KFIELDS
+    DO JF=ILAST+1,KFIELDS
       DO JJ=1,KRLEN
         ZFFT1(JJ) =PREEL(JF,KOFF+JJ-1)
       ENDDO
@@ -761,6 +852,7 @@ ELSE
         ENDDO
       ENDIF
     ENDDO
+  ENDIF
   ENDIF
 ENDIF
 
