@@ -24,6 +24,7 @@ IMPLICIT NONE
 PRIVATE
 PUBLIC :: INIT_ECTRANS_OPTS
 PUBLIC :: LUSE_OPT1, LUSE_OPT2, LUSE_OPT3, LUSE_OPT4, LUSE_OPT5, LUSE_OPT6
+PUBLIC :: LREPORT_FLT_TIME
 
 SAVE
 
@@ -52,6 +53,19 @@ LOGICAL :: LUSE_OPT5    = .FALSE.
 ! is not bit-identical to the KLOT=1 baseline
 ! Enable with ECTRANS_ENABLE_OPT6=1.
 LOGICAL :: LUSE_OPT6   = .FALSE.
+! Diagnostic: instrument the FLT/butterfly (MULT_BUTM) OMP-parallel dispatch
+! in LTINV_CTL/LTDIR_CTL (the per-wavenumber SCHEDULE(DYNAMIC,1) loop -- the
+! active call path in this build, since HAVE_BATCHED_BLAS is off; the
+! LEINV_BATCHED/LEINVAD_BATCHED equivalents are only reachable when that
+! macro is defined) with wall-clock timing of the parallel region plus a
+! per-OMP-thread busy-time breakdown (min/max/avg across threads), to
+! directly quantify load imbalance across the coarse per-wavenumber task
+! dispatch (each butterfly-eligible wavenumber's whole MULT_BUTM call runs
+! on a single thread with no internal parallelism).
+! Prints once per rank-1 call (first few steady-state calls only).
+! Only meaningful when S%LUSEFLT is on (--flt / LDUSEFLT=.TRUE.).
+! Enable with ECTRANS_REPORT_FLT_TIME=1.
+LOGICAL :: LREPORT_FLT_TIME = .FALSE.
 
 LOGICAL, PRIVATE :: LINITIALISED = .FALSE.
 
@@ -73,6 +87,7 @@ LUSE_OPT3 = LUSE_OPT2 .AND. .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT3')
 LUSE_OPT4 = .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT4')
 LUSE_OPT5   = ENV_ENABLE('ECTRANS_ENABLE_OPT5')
 LUSE_OPT6  = ENV_ENABLE('ECTRANS_ENABLE_OPT6')
+LREPORT_FLT_TIME = ENV_ENABLE('ECTRANS_REPORT_FLT_TIME')
 
 IF (NPRINTLEV > 0) THEN
   WRITE(NOUT,'(A)')       '=== ecTrans CPU optimisation flags ==='
@@ -88,6 +103,8 @@ IF (NPRINTLEV > 0) THEN
    &                      '   (ECTRANS_ENABLE_OPT5=1 to enable; NOT bit-id)'
   WRITE(NOUT,'(A,L1,A)')  '  LUSE_OPT6  (fused FTDIR->FOUBUF)          = ', LUSE_OPT6, &
    &                      '   (ECTRANS_ENABLE_OPT6=1 to enable; NOT bit-id)'
+  WRITE(NOUT,'(A,L1,A)')  '  LREPORT_FLT_TIME (MULT_BUTM load balance)  = ', LREPORT_FLT_TIME, &
+   &                      '   (ECTRANS_REPORT_FLT_TIME=1 to enable)'
 ENDIF
 
 LINITIALISED = .TRUE.
