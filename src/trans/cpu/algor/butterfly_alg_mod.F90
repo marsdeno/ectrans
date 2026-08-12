@@ -41,6 +41,11 @@ INTEGER(KIND=JPIM),POINTER :: ICLIST(:) => NULL() ! List of columns in B (column
 REAL(KIND=JPRB),POINTER :: PNONIM(:)  => NULL() ! Non-identety part of interpolation matrix
 REAL(KIND=JPRB),POINTER :: B(:,:)  => NULL()  ! Column skeleton matrix
 REAL(KIND=JPRD),POINTER :: DB(:,:)  => NULL()  ! Column skeleton matrix, as part of pre-computations only
+! double-precision caches of PNONIM/B, used only by MULT_BUTM's
+! KWV==0 (zeroth wavenumber) forced-double-precision path. 
+! Computed/promoted once on first use as REAL(...,JPRD) promotion 
+REAL(KIND=JPRD),POINTER :: PNONIM_D(:,:) => NULL()
+REAL(KIND=JPRD),POINTER :: B_D(:,:)  => NULL()
 END TYPE NODE_TYPE
 
 TYPE LEV_STRUCT
@@ -688,7 +693,7 @@ SUBROUTINE MULT_BUTM(CDTRANS,YD_STRUCT,KF,PVECIN,PVECOUT,KWV)
 ! Multiply matrix by matrix represented by butterfly
 
 CHARACTER(LEN=1),INTENT(IN)   :: CDTRANS       ! 'N' normal matmul, 'T' with transpose of matrix
-TYPE(BUTTERFLY_STRUCT),INTENT(IN) :: YD_STRUCT ! Structure from constucT-butterfly
+TYPE(BUTTERFLY_STRUCT),INTENT(INOUT) :: YD_STRUCT ! Structure from constucT-butterfly
 INTEGER(KIND=JPIM),INTENT(IN) :: KF            ! Number of fields
 INTEGER(KIND=JPIM),OPTIONAL,INTENT(IN) :: KWV           ! zonal wave number m (special_case)
 REAL(KIND=JPRB),INTENT(IN)    :: PVECIN(:,:)     ! Input vector
@@ -703,8 +708,7 @@ REAL(KIND=JPRB),ALLOCATABLE   :: ZBETA(:,:,:)
 LOGICAL :: LLTRANSPOSE
 
 ! IKWV==0 only, LLTRANSPOSE = true only
-REAL(KIND=JPRD),ALLOCATABLE   :: ZPNONIM_D(:,:)
-REAL(KIND=JPRD),ALLOCATABLE   :: ZBETA_D(:,:), ZB_D(:,:)
+REAL(KIND=JPRD),ALLOCATABLE   :: ZBETA_D(:,:)
 REAL(KIND=JPRD),ALLOCATABLE   :: ZOUT_D(:,:), ZIN_D(:,:)
 
 TYPE(NODE_TYPE),POINTER :: YNODE 
@@ -745,26 +749,24 @@ IF (LLTRANSPOSE) THEN
           IM = YNODE%IRANK
           IF( IM <=0 )  CALL ABOR1('mult_butm: IM<=0 not allowed')
           IF(IN>0) THEN
-            ! Force GEMMs for the zeroth wavenumber to be double precision
+            ! Force GEMMs for the zeroth wavenumber to be double precision.
+            ! YNODE%PNONIM is fixed for the structure's lifetime, so its
+            ! double-precision promotion (YNODE%PNONIM_D) is computed once
+            ! (on first use) and cached
             IF (IKWV == 0 .AND. JPRB /= JPRD) THEN
-              ALLOCATE(ZPNONIM_D(IM,IN))
-              II = 0
-              DO JN = 1, IN
-                  DO JM = 1, IM
-                    II = II + 1
-                    ZPNONIM_D(JM,JN) = REAL(YNODE%PNONIM(II),JPRD)
-                  ENDDO
-              ENDDO
+              IF (.NOT. ASSOCIATED(YNODE%PNONIM_D)) THEN
+                ALLOCATE(YNODE%PNONIM_D(IM,IN))
+                YNODE%PNONIM_D(:,:) = RESHAPE(REAL(YNODE%PNONIM(:),JPRD), [IM,IN])
+              ENDIF
               ZBETA_D(1:IM,1:KF) = REAL(ZBETA(IBTST:IBTST+IM-1,1:KF,IBETALV),JPRD)
               CALL GEMM('T', 'N', &
                 &       IN, KF, IM, &
                 &       1.0_JPRD, &
-                &       ZPNONIM_D(1,1), IM, &
+                &       YNODE%PNONIM_D(1,1), IM, &
                 &       ZBETA_D(1,1), ILBETA, &
                 &       0.0_JPRD, &
                 &       ZOUT_D(1,1), YD_STRUCT%N_ORDER)
               ZVECOUT(YNODE%IRANK+1:YNODE%IRANK+IN,1:KF) = REAL(ZOUT_D(1:IN,1:KF),JPRB)
-              DEALLOCATE(ZPNONIM_D)
             ELSE
               CALL GEMM('T', 'N', &
                 &       IN, KF, IM, &
@@ -791,20 +793,21 @@ IF (LLTRANSPOSE) THEN
             ILR = YNODE%ILROW
             IROWS =YNODE%IROWS
             IRANK = YNODE%IRANK
-            ! Force GEMMs for the zeroth wavenumber to be double precision
+            ! Force GEMMs for the zeroth wavenumber to be double precision.
             IF (IKWV == 0 .AND. JPRB /= JPRD) THEN
-              ALLOCATE(ZB_D(IROWS,IRANK))
-              ZB_D(1:IROWS,1:IRANK) = REAL(YNODE%B(1:IROWS,1:IRANK),JPRD)
+              IF (.NOT. ASSOCIATED(YNODE%B_D)) THEN
+                ALLOCATE(YNODE%B_D(IROWS,IRANK))
+                YNODE%B_D(:,:) = REAL(YNODE%B(:,:),JPRD)
+              ENDIF
               ZIN_D(1:ILR-IFR+1,1:KF) = REAL(PVECIN(IFR:ILR,1:KF),JPRD)
               CALL GEMM('T', 'N', &
                 &       IRANK, KF, IROWS, &
                 &       1.0_JPRD, &
-                &       ZB_D, IROWS, &
+                &       YNODE%B_D, IROWS, &
                 &       ZIN_D, IRIN, &
                 &       0.0_JPRD, &
                 &       ZBETA_D, ILBETA)
               ZBETA(IBTST:IBTST+IRANK-1,1:KF,IBETALV) = REAL(ZBETA_D(1:IRANK,1:KF),JPRM)
-              DEALLOCATE(ZB_D)
             ELSE
               CALL GEMM('T', 'N', &
                 &       IRANK, KF, IROWS, &
@@ -835,26 +838,21 @@ IF (LLTRANSPOSE) THEN
           IM = YNODE%IRANK
           IF( IM <=0 )  CALL ABOR1('mult_butm: IM<=0 not allowed')
           IF(IN>0) THEN
-            ! Force GEMMs for the zeroth wavenumber to be double precision
+            ! Force GEMMs for the zeroth wavenumber to be double precision.
             IF (IKWV == 0 .AND. JPRB /= JPRD) THEN
-              ALLOCATE(ZPNONIM_D(IM,IN))
-              II = 0
-              DO JN = 1, IN
-                DO JM = 1, IM
-                    II = II + 1
-                    ZPNONIM_D(JM,JN) = REAL(YNODE%PNONIM(II),JPRD)
-                ENDDO
-              ENDDO
+              IF (.NOT. ASSOCIATED(YNODE%PNONIM_D)) THEN
+                ALLOCATE(YNODE%PNONIM_D(IM,IN))
+                YNODE%PNONIM_D(:,:) = RESHAPE(REAL(YNODE%PNONIM(:),JPRD), [IM,IN])
+              ENDIF
               ZBETA_D(1:IM,1:KF) = REAL(ZBETA(IBTST:IBTST+IM-1,1:KF,IBETALV),JPRD)
               CALL GEMM('T', 'N', &
                 &       IN, KF, IM, &
                 &       1.0_JPRD, &
-                &       ZPNONIM_D, IM, &
+                &       YNODE%PNONIM_D, IM, &
                 &       ZBETA_D, ILBETA, &
                 &       0.0_JPRD,&
                 &       ZOUT_D, YD_STRUCT%N_ORDER)
               ZVECOUT(YNODE%IRANK+1:YNODE%IRANK+IN,1:KF) = REAL(ZOUT_D(1:IN,1:KF),JPRM)
-              DEALLOCATE(ZPNONIM_D)
             ELSE
               CALL GEMM('T', 'N', &
                 &       IN, KF, IM, &
@@ -917,13 +915,13 @@ ELSE
           IM = IRANK
           IN = YNODE%ICOLS-IRANK
           DO JF=1,KF
-            DO JN=1,YNODE%ICOLS
+            DO JN=1,IRANK
               IDX = YNODE%ICLIST(JN)
-              IF(JN <= IRANK) THEN
-                ZBETA(IBTST+JN-1,JF,IBETALV) = PVECIN(IFR+IDX-1,JF)
-              ELSE
-                ZVECIN(JN,JF) = PVECIN(IFR+IDX-1,JF)
-              ENDIF
+              ZBETA(IBTST+JN-1,JF,IBETALV) = PVECIN(IFR+IDX-1,JF)
+            ENDDO
+            DO JN=IRANK+1,YNODE%ICOLS
+              IDX = YNODE%ICLIST(JN)
+              ZVECIN(JN,JF) = PVECIN(IFR+IDX-1,JF)
             ENDDO
           ENDDO
           IF( IRANK <=0 )  CALL ABOR1('mult_butm: IRANK<=0 not allowed')
@@ -954,13 +952,13 @@ ELSE
           IM = IRANK
           IN = YNODE%ICOLS-IRANK
           DO JF=1,KF
-            DO JN=1,YNODE%ICOLS
+            DO JN=1,IRANK
               IDX = YNODE%ICLIST(JN)
-              IF(JN <= IRANK) THEN
-                ZBETA(IBTST+JN-1,JF,IBETALV) = ZBETA(IBTSTL+IDX-1,JF,IBETALVM1)
-              ELSE
-                ZVECIN(JN,JF) = ZBETA(IBTSTL+IDX-1,JF,IBETALVM1)
-              ENDIF
+              ZBETA(IBTST+JN-1,JF,IBETALV) = ZBETA(IBTSTL+IDX-1,JF,IBETALVM1)
+            ENDDO
+            DO JN=IRANK+1,YNODE%ICOLS
+              IDX = YNODE%ICLIST(JN)
+              ZVECIN(JN,JF) = ZBETA(IBTSTL+IDX-1,JF,IBETALVM1)
             ENDDO
           ENDDO
           IF( IRANK <=0 )  CALL ABOR1('mult_butm: IRANK<=0 not allowed')
