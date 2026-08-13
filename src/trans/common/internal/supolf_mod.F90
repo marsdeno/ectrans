@@ -62,6 +62,7 @@ SUBROUTINE SUPOLF(KM,KNSMAX,DDMU,DDPOL,KCHEAP)
 USE EC_PARKIND  ,ONLY : JPRD, JPIM
 
 USE TPM_POL   ,ONLY : DFI, DFB, DFG, DFA, DFF
+USE IEEE_ARITHMETIC, ONLY : IEEE_IS_FINITE
 
 IMPLICIT NONE
 
@@ -226,6 +227,15 @@ ELSE
   ENDIF
 
   DO JN = KM + ISTART + 4, KNSMAX, IINC
+    ! Correct non-finite values (NaN or Inf) surviving from an
+    ! earlier step of the recurrence (seen intermittently with -fpe0
+    ! trapping at large OMP thread count at high truncation).
+    ! Check all four elements of the slice DDPOL(JN-4:JN-1) that
+    ! participate in the rescaling divide below.
+    IF (.NOT. IEEE_IS_FINITE(DDPOL(JN-4))) DDPOL(JN-4) = ZEPS
+    IF (.NOT. IEEE_IS_FINITE(DDPOL(JN-3))) DDPOL(JN-3) = ZEPS
+    IF (.NOT. IEEE_IS_FINITE(DDPOL(JN-2))) DDPOL(JN-2) = ZEPS
+    IF (.NOT. IEEE_IS_FINITE(DDPOL(JN-1))) DDPOL(JN-1) = ZEPS
     IF (ABS(DDPOL(JN-4)) > ZSCALE) THEN
       DDPOL(JN-4:JN-1:IINC) = DDPOL(JN-4:JN-1:IINC) / ZSCALE
       ICORR(JN-4:KNSMAX:IINC) = ICORR(JN-4:KNSMAX:IINC) - 1
@@ -237,6 +247,7 @@ ELSE
 
   ! Undo all rescalings to get back the true value
   DO JN = KM + ISTART, KNSMAX, IINC
+    IF (.NOT. IEEE_IS_FINITE(DDPOL(JN))) DDPOL(JN) = ZEPS  ! protect against non-finite
     DO JCORR = 1, ICORR(JN)
       DDPOL(JN) = DDPOL(JN) / ZSCALE
       IF (DDPOL(JN) < ZEPS) THEN
