@@ -15,6 +15,10 @@ macro( ectrans_find_batched_blas )
     if( HAVE_MKL )
       # MKL always supports batched BLAS
       set( HAVE_BATCHED_BLAS ON )
+    elseif( DEFINED BLAS_mkl_core_LIBRARY AND BLAS_mkl_core_LIBRARY )
+      # MKL detected as BLAS provider even without HAVE_MKL (e.g. BLA_VENDOR=Generic)
+      message( STATUS "Batched BLAS: MKL detected via BLAS_mkl_core_LIBRARY" )
+      set( HAVE_BATCHED_BLAS ON )
     else()
       # Try to detect batched BLAS (cblas_dgemm_batch) in LAPACK_LIBRARIES
       if( LAPACK_LIBRARIES )
