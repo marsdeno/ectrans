@@ -24,6 +24,7 @@ IMPLICIT NONE
 PRIVATE
 PUBLIC :: INIT_ECTRANS_OPTS
 PUBLIC :: LUSE_OPT1, LUSE_OPT2, LUSE_OPT3, LUSE_OPT4, LUSE_OPT5, LUSE_OPT6
+PUBLIC :: LUSE_OPT7, LUSE_OPT8
 PUBLIC :: LUSE_LEVS_TR, LVERIFY_LEVS_NODE
 PUBLIC :: LREPORT_TR_BW, ZTR_BW_ROOFLINE, LDUMP_TR_SKEW
 PUBLIC :: LUSE_RECTANGULAR_DECOMP
@@ -57,7 +58,20 @@ LOGICAL :: LUSE_OPT5    = .FALSE.
 ! is not bit-identical to the KLOT=1 baseline
 ! Enable with ECTRANS_ENABLE_OPT6=1.
 LOGICAL :: LUSE_OPT6   = .FALSE.
-
+! OPT7: TRLTOG: hoist KNDOFF(ISEND) out of the JL-parallel send-pack loop
+! (both the LUSE_OPT2 single-A2A branch and the legacy per-peer branch), so
+! each thread reads a scalar rather than re-dereferencing YDBUFS%INDOFF on
+! every JL iteration. Bit-identical.
+! Enable ECTRANS_DISABLE_OPT7=1 to revert to the un-hoisted form.
+LOGICAL :: LUSE_OPT7 = .TRUE.
+! OPT8: LTINV: per-kernel DR_HOOK regions inside LTINV_MOD (PRFI1B/VDTUV/
+! SPNSDE/LEINV/ASRE1B) so drhook.prof profiles attribute cost to individual
+! routines instead of the enclosing LTINV_MOD region. Instrumentation-only:
+! no functional or performance change when DR_HOOK is disabled (LHOOK is
+! compile-time constant folded false in production builds without DR_HOOK=1
+! at runtime), and no change to the numerics in either case.
+! Enable ECTRANS_DISABLE_OPT8=1 to omit the extra regions.
+LOGICAL :: LUSE_OPT8 = .TRUE.
 ! TRGTOL/TRLTOG: route the G<->L transpose alltoallv through the 32-rank
 ! MPL_ALL_LEVS_COMM (fixed wave-set, varying V-set) instead of the global
 ! world communicator. VALID ONLY when the grid-point collars are aligned
@@ -162,6 +176,8 @@ LUSE_OPT3 = LUSE_OPT2 .AND. .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT3')
 LUSE_OPT4 = .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT4')
 LUSE_OPT5   = ENV_ENABLE('ECTRANS_ENABLE_OPT5')
 LUSE_OPT6  = ENV_ENABLE('ECTRANS_ENABLE_OPT6')
+LUSE_OPT7 = .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT7')
+LUSE_OPT8 = .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT8')
 LUSE_LEVS_TR       = ENV_ENABLE('ECTRANS_ENABLE_LEVS_TR')
 LVERIFY_LEVS_NODE  = ENV_ENABLE('ECTRANS_VERIFY_LEVS_NODE')
 LREPORT_TR_BW      = ENV_ENABLE('ECTRANS_REPORT_TR_BW')
@@ -185,6 +201,10 @@ IF (NPRINTLEV > 0) THEN
    &                      '   (ECTRANS_ENABLE_OPT5=1 to enable; NOT bit-id)'
   WRITE(NOUT,'(A,L1,A)')  '  LUSE_OPT6  (fused FTDIR->FOUBUF)          = ', LUSE_OPT6, &
    &                      '   (ECTRANS_ENABLE_OPT6=1 to enable; NOT bit-id)'
+  WRITE(NOUT,'(A,L1,A)')  '  LUSE_OPT7 (TRLTOG KNDOFF hoist)           = ', LUSE_OPT7, &
+   &                      '   (ECTRANS_DISABLE_OPT7=1 to disable)'
+  WRITE(NOUT,'(A,L1,A)')  '  LUSE_OPT8 (LTINV per-kernel DR_HOOK)      = ', LUSE_OPT8, &
+   &                      '   (ECTRANS_DISABLE_OPT8=1 to disable)'
   WRITE(NOUT,'(A,L1,A)')  '  LUSE_LEVS_TR (G<->L transpose on LEVS comm)= ', LUSE_LEVS_TR, &
    &                      '   (ECTRANS_ENABLE_LEVS_TR=1; needs collar==waveset)'
   WRITE(NOUT,'(A,L1,A)')  '  LVERIFY_LEVS_NODE (LEVS on-node diag)      = ', LVERIFY_LEVS_NODE, &
