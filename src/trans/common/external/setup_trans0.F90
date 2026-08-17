@@ -81,6 +81,7 @@ USE SUMP_TRANS0_MOD     ,ONLY : SUMP_TRANS0
 USE ABORT_TRANS_MOD     ,ONLY : ABORT_TRANS
 USE EQ_REGIONS_MOD      ,ONLY : N_REGIONS, N_REGIONS_EW, N_REGIONS_NS
 USE ECTRANS_VERSION_MOD ,ONLY : ECTRANS_VERSION_STR, ECTRANS_GIT_SHA1
+USE TPM_ECTRANS_OPTS    ,ONLY : INIT_ECTRANS_OPTS
 
 !endif INTERFACE
 
@@ -193,6 +194,11 @@ IF(PRESENT(KOPT_MEMORY_TR))THEN
 ENDIF
 
 ! Initial setup
+! Cache all ECTRANS_* optimisation/decomposition env-var flags before
+! SUMP_TRANS0 runs, so SUMP_TRANS0 (and later SUMP_TRANS) can read the
+! cached module flags directly instead of re-querying the environment.
+! Call moved forwards from SETUP_TRANS
+CALL INIT_ECTRANS_OPTS()
 CALL SUMP_TRANS0
 
 IF(PRESENT(K_REGIONS_NS)) THEN

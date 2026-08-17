@@ -218,6 +218,8 @@ CALL SET_RESOL(IDEF_RESOL,LDSETUP=.TRUE.)
 
 ! Read ECTRANS_DISABLE_OPT* env vars once and cache them as module
 ! LOGICALs (see tpm_ectrans_opts.F90).
+! Should already have been called from SETUP_TRANS0, but safe to 
+! call again 
 CALL INIT_ECTRANS_OPTS()
 
 IF(LLP1) WRITE(NOUT,*) '=== DEFINING RESOLUTION ',NCUR_RESOL

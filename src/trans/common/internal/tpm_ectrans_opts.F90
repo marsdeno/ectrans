@@ -24,6 +24,9 @@ IMPLICIT NONE
 PRIVATE
 PUBLIC :: INIT_ECTRANS_OPTS
 PUBLIC :: LUSE_OPT1, LUSE_OPT2, LUSE_OPT3, LUSE_OPT4, LUSE_OPT5, LUSE_OPT6
+PUBLIC :: LUSE_LEVS_TR, LVERIFY_LEVS_NODE
+PUBLIC :: LREPORT_TR_BW, ZTR_BW_ROOFLINE, LDUMP_TR_SKEW
+PUBLIC :: LUSE_RECTANGULAR_DECOMP
 PUBLIC :: LREPORT_FLT_TIME
 
 SAVE
@@ -53,6 +56,67 @@ LOGICAL :: LUSE_OPT5    = .FALSE.
 ! is not bit-identical to the KLOT=1 baseline
 ! Enable with ECTRANS_ENABLE_OPT6=1.
 LOGICAL :: LUSE_OPT6   = .FALSE.
+
+! TRGTOL/TRLTOG: route the G<->L transpose alltoallv through the 32-rank
+! MPL_ALL_LEVS_COMM (fixed wave-set, varying V-set) instead of the global
+! world communicator. VALID ONLY when the grid-point collars are aligned
+! 1:1 with the Fourier wave-sets (Option A: N_REGIONS_NS==NPRTRW and every
+! N_REGIONS(:)==NPRTRV). Under that alignment all non-zero G<->L traffic is
+! confined to the LEVS sub-communicator, so the collective no longer
+! synchronises across all NPROC ranks. The call sites AND this flag with a
+! runtime alignment predicate, so enabling it on a non-aligned decomposition
+! falls back to the world-comm path.
+! OPT-IN: default .FALSE. Enable with ECTRANS_ENABLE_LEVS_TR=1.
+LOGICAL :: LUSE_LEVS_TR = .FALSE.
+
+! Diagnostic: on the first TRGTOL, gather hostnames within MPL_ALL_LEVS_COMM
+! and report whether the 32-rank group is co-located on a single node (the
+! precondition for LUSE_LEVS_TR to yield intra-node communication). Prints
+! once per LEVS-comm root. Enable with ECTRANS_VERIFY_LEVS_NODE=1.
+LOGICAL :: LVERIFY_LEVS_NODE = .FALSE.
+
+! Diagnostic: instrument the G<->L transpose comm regions (TRLTOG L->G and
+! TRGTOL G->L) with a wall-clock timer and a payload byte counter, then
+! report achieved node bandwidth (GB/s) and its fraction of a configurable
+! memory-bandwidth roofline. Accumulates over a fixed count of steady-state
+! calls (skipping warmup) and prints once from the LEVS-comm root.
+! Enable with ECTRANS_REPORT_TR_BW=1.
+LOGICAL :: LREPORT_TR_BW = .FALSE.
+
+! Roofline denominator (GB/s per node) for the LREPORT_TR_BW %-of-peak
+! figure. Defaults to 350.0 (roughly STREAM for 2x EPYC 7742).
+! Override with ECTRANS_TR_BW_ROOFLINE=<real>.
+REAL :: ZTR_BW_ROOFLINE = 350.0
+
+! Straggler profiling: when set (and LREPORT_TR_BW on), the G<->L transpose
+! pre-issue barrier all-gathers every rank's barrier-wait over the world comm
+! for the sample window and dumps it to tr_skew.csv (rank 1 only), so the skew
+! can be attributed to systematic slow ranks/nodes vs random per-step jitter.
+! Enable with ECTRANS_DUMP_TR_SKEW=1.
+LOGICAL :: LDUMP_TR_SKEW = .FALSE.
+
+! Grid decomposition selector. DEFAULT .FALSE. keeps the stock Leopardi
+! equal-regions partition (variable sectors per collar, polar caps) with the
+! standard SUMPLATBEQ latitude split -- the traditional, always-supported
+! decomposition used throughout the rest of IFS. Setting
+! ECTRANS_RECTANGULAR_DECOMP=1 opts in to a "rectangular" decomposition
+! instead: SUMP_TRANS0 overrides the equal-regions output so that the NS
+! collar count equals NPRTRW and every collar holds exactly NPROC/NPRTRW=
+! NPRTRV ranks, and SUMPLAT cuts grid latitudes on the Fourier wave-set
+! boundaries (LUSE_FOURIER_BOUNDARIES). That alignment is the precondition
+! for LUSE_LEVS_TR (on-node transpose); it is opt-in because it changes grid
+! load balance vs the native decomposition and is only useful when actually
+! exercising LUSE_LEVS_TR.
+! Known issue : for at least some truncation/NPRTRW combinations the Fourier-
+! boundary-derived collars come out degenerate (an empty collar absorbing
+! zero grid points, with another collar absorbing the rest), which aborts
+! in SUSTAONL when LDSPLIT=.TRUE. and silently leaves a rank with zero grid
+! points otherwise. Not yet fixed -- treat as experimental.
+! Cached here by INIT_ECTRANS_OPTS, called from SETUP_TRANS0 (before
+! SUMP_TRANS0 runs) so the flag is available in time for both SUMP_TRANS0
+! and the later SUMP_TRANS call sites.
+LOGICAL :: LUSE_RECTANGULAR_DECOMP = .FALSE.
+
 ! Diagnostic: instrument the FLT/butterfly (MULT_BUTM) OMP-parallel dispatch
 ! in LTINV_CTL/LTDIR_CTL (the per-wavenumber SCHEDULE(DYNAMIC,1) loop -- the
 ! active call path in this build, since HAVE_BATCHED_BLAS is off; the
@@ -87,6 +151,12 @@ LUSE_OPT3 = LUSE_OPT2 .AND. .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT3')
 LUSE_OPT4 = .NOT. ENV_DISABLE('ECTRANS_DISABLE_OPT4')
 LUSE_OPT5   = ENV_ENABLE('ECTRANS_ENABLE_OPT5')
 LUSE_OPT6  = ENV_ENABLE('ECTRANS_ENABLE_OPT6')
+LUSE_LEVS_TR       = ENV_ENABLE('ECTRANS_ENABLE_LEVS_TR')
+LVERIFY_LEVS_NODE  = ENV_ENABLE('ECTRANS_VERIFY_LEVS_NODE')
+LREPORT_TR_BW      = ENV_ENABLE('ECTRANS_REPORT_TR_BW')
+LDUMP_TR_SKEW      = ENV_ENABLE('ECTRANS_DUMP_TR_SKEW')
+LUSE_RECTANGULAR_DECOMP = ENV_ENABLE('ECTRANS_RECTANGULAR_DECOMP')
+CALL ENV_REAL('ECTRANS_TR_BW_ROOFLINE', ZTR_BW_ROOFLINE)
 LREPORT_FLT_TIME = ENV_ENABLE('ECTRANS_REPORT_FLT_TIME')
 
 IF (NPRINTLEV > 0) THEN
@@ -103,6 +173,18 @@ IF (NPRINTLEV > 0) THEN
    &                      '   (ECTRANS_ENABLE_OPT5=1 to enable; NOT bit-id)'
   WRITE(NOUT,'(A,L1,A)')  '  LUSE_OPT6  (fused FTDIR->FOUBUF)          = ', LUSE_OPT6, &
    &                      '   (ECTRANS_ENABLE_OPT6=1 to enable; NOT bit-id)'
+  WRITE(NOUT,'(A,L1,A)')  '  LUSE_LEVS_TR (G<->L transpose on LEVS comm)= ', LUSE_LEVS_TR, &
+   &                      '   (ECTRANS_ENABLE_LEVS_TR=1; needs collar==waveset)'
+  WRITE(NOUT,'(A,L1,A)')  '  LVERIFY_LEVS_NODE (LEVS on-node diag)      = ', LVERIFY_LEVS_NODE, &
+   &                      '   (ECTRANS_VERIFY_LEVS_NODE=1 to enable)'
+  WRITE(NOUT,'(A,L1,A)')  '  LREPORT_TR_BW (G<->L transpose BW report)  = ', LREPORT_TR_BW, &
+   &                      '   (ECTRANS_REPORT_TR_BW=1 to enable)'
+  WRITE(NOUT,'(A,F8.1,A)')'  ZTR_BW_ROOFLINE (GB/s per node)            = ', ZTR_BW_ROOFLINE, &
+   &                      '   (ECTRANS_TR_BW_ROOFLINE=<real> to override)'
+  WRITE(NOUT,'(A,L1,A)')  '  LDUMP_TR_SKEW (per-rank skew dump)         = ', LDUMP_TR_SKEW, &
+   &                      '   (ECTRANS_DUMP_TR_SKEW=1 to enable)'
+  WRITE(NOUT,'(A,L1,A)')  '  LUSE_RECTANGULAR_DECOMP (opt-in, needs LEVS_TR)= ', LUSE_RECTANGULAR_DECOMP, &
+   &                      '   (ECTRANS_RECTANGULAR_DECOMP=1; default=native eq-regions)'
   WRITE(NOUT,'(A,L1,A)')  '  LREPORT_FLT_TIME (MULT_BUTM load balance)  = ', LREPORT_FLT_TIME, &
    &                      '   (ECTRANS_REPORT_FLT_TIME=1 to enable)'
 ENDIF
@@ -150,5 +232,27 @@ IF (ISTATUS == 0) THEN
 ENDIF
 
 END FUNCTION ENV_ENABLE
+
+! -----------------------------------------------------------------------
+
+SUBROUTINE ENV_REAL(CDNAME, PVAL)
+
+! If the environment variable CDNAME is set to a parseable real value,
+! overwrite PVAL with it. Otherwise leave PVAL unchanged 
+
+CHARACTER(LEN=*), INTENT(IN)    :: CDNAME
+REAL,             INTENT(INOUT) :: PVAL
+
+CHARACTER(LEN=32) :: CLVAL
+INTEGER           :: ISTATUS, IOS
+REAL              :: ZTMP
+
+CALL GET_ENVIRONMENT_VARIABLE(CDNAME, CLVAL, STATUS=ISTATUS)
+IF (ISTATUS == 0 .AND. LEN_TRIM(CLVAL) > 0) THEN
+  READ(CLVAL, *, IOSTAT=IOS) ZTMP
+  IF (IOS == 0) PVAL = ZTMP
+ENDIF
+
+END SUBROUTINE ENV_REAL
 
 END MODULE TPM_ECTRANS_OPTS

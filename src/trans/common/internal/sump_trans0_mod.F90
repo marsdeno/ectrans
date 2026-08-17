@@ -14,10 +14,9 @@ SUBROUTINE SUMP_TRANS0
 
 ! Set up distributed environment for the transform package (part 0)
 
-USE EC_PARKIND  ,ONLY : JPIM
-USE MPL_MODULE  ,ONLY : MPL_GROUPS_CREATE, MPL_MYRANK, MPL_NPROC
-
-USE TPM_GEN         ,ONLY : NOUT, LMPOFF, NPRINTLEV
+USE EC_PARKIND      ,ONLY : JPIM
+USE MPL_MODULE      ,ONLY : MPL_GROUPS_CREATE, MPL_MYRANK, MPL_NPROC
+USE TPM_GEN         ,ONLY : NOUT, NERR, LMPOFF, NPRINTLEV
 USE TPM_DISTR       ,ONLY : LEQ_REGIONS, MTAGDISTGP, MTAGDISTSP, MTAGGL, &
      &                      MTAGLETR, MTAGLG, MTAGLM, MTAGML, MTAGPART,  &
      &                      MYSETV, MYSETW, NPRCIDS,                     &
@@ -28,6 +27,7 @@ USE EQ_REGIONS_MOD  ,ONLY : EQ_REGIONS, MY_REGION_EW, MY_REGION_NS,      &
      &                      N_REGIONS, N_REGIONS_EW, N_REGIONS_NS
 USE PE2SET_MOD      ,ONLY : PE2SET
 USE ABORT_TRANS_MOD ,ONLY : ABORT_TRANS
+USE TPM_ECTRANS_OPTS,ONLY : LUSE_RECTANGULAR_DECOMP
 
 IMPLICIT NONE
 
@@ -70,6 +70,22 @@ IF( LEQ_REGIONS )THEN
   ALLOCATE(N_REGIONS(NPROC+2))
   N_REGIONS(:)=0
   CALL EQ_REGIONS(NPROC)
+  ! Decomposition selector is cached by INIT_ECTRANS_OPTS, called from
+  ! SETUP_TRANS0 before SUMP_TRANS0 runs (see setup_trans0.F90).
+  IF( LUSE_RECTANGULAR_DECOMP )THEN
+    ! Override (opt-in only): make NS collar count match Fourier wave-set
+    ! count (NPRTRW) so that SUMPLAT can use Fourier boundaries directly with
+    ! KPROCA=NPRTRW. This forces the rectangular decomposition that aligns
+    ! grid collars 1:1 with wave-sets (precondition for LUSE_LEVS_TR).
+    N_REGIONS_NS = NPRTRW
+    N_REGIONS_EW = NPROC / NPRTRW
+    DEALLOCATE(N_REGIONS)
+    ALLOCATE(N_REGIONS(N_REGIONS_NS))
+    N_REGIONS(:) = N_REGIONS_EW
+  ENDIF
+  ! DEFAULT (ECTRANS_RECTANGULAR_DECOMP not set): keep the stock EQ_REGIONS
+  ! output untouched (N_REGIONS_NS, N_REGIONS_EW, N_REGIONS set inside
+  ! EQ_REGIONS) -- the Leopardi equal-regions partition.
 ELSE
   N_REGIONS_NS=NPRGPNS
   ALLOCATE(N_REGIONS(N_REGIONS_NS))
@@ -79,6 +95,27 @@ ENDIF
 CALL PE2SET(MYPROC,MY_REGION_NS,MY_REGION_EW,MYSETW,MYSETV)
 IF(LLP1) WRITE(NOUT,*)'MYPROC=',MYPROC,'MY_REGION_NS =',MY_REGION_NS,&
  & ' MY_REGION_EW=',MY_REGION_EW,' MYSETW=',MYSETW,' MYSETV=',MYSETV
+
+! Rank-1 diagnostic (always on): print which grid decomposition is live 
+IF( LEQ_REGIONS .AND. MYPROC == 1 )THEN
+  IF( .NOT. LUSE_RECTANGULAR_DECOMP )THEN
+    WRITE(NOUT,'(A,I0,A,I0,A,20(1X,I0))') &
+     & 'DECOMP: NATIVE_EQREGIONS  N_REGIONS_NS=',N_REGIONS_NS, &
+     & ' N_REGIONS_EW(max)=',N_REGIONS_EW, &
+     & '  N_REGIONS(1:min(20,ns))=', N_REGIONS(1:MIN(20,N_REGIONS_NS))
+    WRITE(NERR,'(A,I0,A,I0,A,20(1X,I0))') &
+     & 'DECOMP: NATIVE_EQREGIONS  N_REGIONS_NS=',N_REGIONS_NS, &
+     & ' N_REGIONS_EW(max)=',N_REGIONS_EW, &
+     & '  N_REGIONS(1:min(20,ns))=', N_REGIONS(1:MIN(20,N_REGIONS_NS))
+  ELSE
+    WRITE(NOUT,'(A,I0,A,I0,A,I0)') &
+     & 'DECOMP: RECTANGULAR  N_REGIONS_NS=NPRTRW=',N_REGIONS_NS, &
+     & '  N_REGIONS_EW=NPRTRV=',N_REGIONS_EW,'  (all collars uniform=',N_REGIONS(1)
+    WRITE(NERR,'(A,I0,A,I0,A,I0)') &
+     & 'DECOMP: RECTANGULAR  N_REGIONS_NS=NPRTRW=',N_REGIONS_NS, &
+     & '  N_REGIONS_EW=NPRTRV=',N_REGIONS_EW,'  (all collars uniform=',N_REGIONS(1)
+  ENDIF
+ENDIF
 
 
 ALLOCATE(NPRCIDS(NPROC))
