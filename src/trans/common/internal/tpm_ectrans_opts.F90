@@ -28,6 +28,7 @@ PUBLIC :: LUSE_LEVS_TR, LVERIFY_LEVS_NODE
 PUBLIC :: LREPORT_TR_BW, ZTR_BW_ROOFLINE, LDUMP_TR_SKEW
 PUBLIC :: LUSE_RECTANGULAR_DECOMP
 PUBLIC :: LREPORT_FLT_TIME
+PUBLIC :: LREPORT_STAGE_TIME
 
 SAVE
 
@@ -131,6 +132,16 @@ LOGICAL :: LUSE_RECTANGULAR_DECOMP = .FALSE.
 ! Enable with ECTRANS_REPORT_FLT_TIME=1.
 LOGICAL :: LREPORT_FLT_TIME = .FALSE.
 
+! Diagnostic: per-stage wall-clock timing breakdown (TIMEF, not GSTATS) of the
+! transform stages in FTDIR_CTL/FTINV_CTL/LTDIR_CTL/LTINV_CTL and their
+! LTDIR_BATCHED_CTL/LTINV_BATCHED_CTL counterparts (transpose / Legendre /
+! Fourier regions), accumulated and averaged over the first 10 calls on rank
+! 1 only. Also gates FTDIR_CTL's one-time rank-1 dump of the grid
+! decomposition (grid_decomp.csv: latitude, NLOEN, owning wave-set), which is
+! informational context for the same report.
+! Enable with ECTRANS_REPORT_STAGE_TIME=1.
+LOGICAL :: LREPORT_STAGE_TIME = .FALSE.
+
 LOGICAL, PRIVATE :: LINITIALISED = .FALSE.
 
 CONTAINS
@@ -158,6 +169,7 @@ LDUMP_TR_SKEW      = ENV_ENABLE('ECTRANS_DUMP_TR_SKEW')
 LUSE_RECTANGULAR_DECOMP = ENV_ENABLE('ECTRANS_RECTANGULAR_DECOMP')
 CALL ENV_REAL('ECTRANS_TR_BW_ROOFLINE', ZTR_BW_ROOFLINE)
 LREPORT_FLT_TIME = ENV_ENABLE('ECTRANS_REPORT_FLT_TIME')
+LREPORT_STAGE_TIME = ENV_ENABLE('ECTRANS_REPORT_STAGE_TIME')
 
 IF (NPRINTLEV > 0) THEN
   WRITE(NOUT,'(A)')       '=== ecTrans CPU optimisation flags ==='
@@ -187,6 +199,8 @@ IF (NPRINTLEV > 0) THEN
    &                      '   (ECTRANS_RECTANGULAR_DECOMP=1; default=native eq-regions)'
   WRITE(NOUT,'(A,L1,A)')  '  LREPORT_FLT_TIME (MULT_BUTM load balance)  = ', LREPORT_FLT_TIME, &
    &                      '   (ECTRANS_REPORT_FLT_TIME=1 to enable)'
+  WRITE(NOUT,'(A,L1,A)')  '  LREPORT_STAGE_TIME (FTDIR/FTINV/LTDIR/LTINV)= ', LREPORT_STAGE_TIME, &
+   &                      '   (ECTRANS_REPORT_STAGE_TIME=1 to enable)'
 ENDIF
 
 LINITIALISED = .TRUE.
