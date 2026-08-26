@@ -32,7 +32,8 @@ USE MYSENDSET_MOD   ,ONLY : MYSENDSET
 USE MYRECVSET_MOD   ,ONLY : MYRECVSET
 USE EQ_REGIONS_MOD  ,ONLY : MY_REGION_NS, MY_REGION_EW,           &
      &                      N_REGIONS, N_REGIONS_EW, N_REGIONS_NS
-USE TPM_ECTRANS_OPTS,ONLY : LUSE_RECTANGULAR_DECOMP
+USE TPM_ECTRANS_OPTS,ONLY : LUSE_RECTANGULAR_DECOMP, LDUMP_TR_SKEW
+USE MPL_MODULE      ,ONLY : MPL_ALLGATHERV
 !
 
 IMPLICIT NONE
@@ -50,6 +51,12 @@ LOGICAL    :: LLP1,LLP2
 LOGICAL, SAVE :: LL_GP_DUMPED = .FALSE.
 LOGICAL    :: LLFOURIER_BOUNDS
 INTEGER(KIND=JPIM) :: IDUMP
+! once-only per-rank spectral-payload dump (guard: LDUMP_TR_SKEW).
+LOGICAL, SAVE :: LL_SPEC_DUMPED = .FALSE.
+REAL(KIND=JPRD) :: ZSPEC_LOC(4)
+REAL(KIND=JPRD), ALLOCATABLE :: ZSPEC_ALL(:)
+INTEGER(KIND=JPIM), ALLOCATABLE :: ISPC_CNTS(:)
+INTEGER(KIND=JPIM) :: ISUNIT, JR, IPP
 
 !     ------------------------------------------------------------------
 
@@ -88,6 +95,31 @@ IF(.NOT.D%LGRIDONLY) THEN
       D%NLTSGTB(D%NPROCM(JM)) = D%NLTSGTB(D%NPROCM(JM))+1
     ENDDO
   ENDDO
+  ! once-only per-rank spectral-payload dump (guard: LDUMP_TR_SKEW): the
+  ! rank's own Fourier (m,lat) data count = sum over its lat block of
+  ! (NMEN+1), plus its wave-set lat block (NULTPP/NPTRLS from SUMPLATF).
+  IF (LDUMP_TR_SKEW .AND. .NOT. LL_SPEC_DUMPED) THEN
+    LL_SPEC_DUMPED = .TRUE.
+    IPP = SUM(D%NLTSGTB(1:NPRTRNS))
+    ZSPEC_LOC(1) = REAL(MYSETW, JPRD)
+    ZSPEC_LOC(2) = REAL(D%NULTPP(MYSETW), JPRD)
+    ZSPEC_LOC(3) = REAL(D%NPTRLS(MYSETW), JPRD)
+    ZSPEC_LOC(4) = REAL(IPP, JPRD)
+    ALLOCATE(ZSPEC_ALL(4*NPROC), ISPC_CNTS(NPROC))
+    ISPC_CNTS(:) = 4
+    CALL MPL_ALLGATHERV(ZSPEC_LOC(1:4), ZSPEC_ALL, ISPC_CNTS, CDSTRING='SUMP_TRANS: SPEC GATHER')
+    IF (MYPROC == 1) THEN
+      OPEN(NEWUNIT=ISUNIT, FILE='tr_spec.csv', STATUS='REPLACE', ACTION='WRITE')
+      WRITE(ISUNIT,'(A,I0)') '# per-rank spectral payload; nproc=', NPROC
+      WRITE(ISUNIT,'(A)') 'rank,mysetw,nultpp,nptrls,npp'
+      DO JR = 1, NPROC
+        WRITE(ISUNIT,'(I0,4(A,I0))') JR, ',', NINT(ZSPEC_ALL(4*JR-3)), ',', NINT(ZSPEC_ALL(4*JR-2)), &
+          & ',', NINT(ZSPEC_ALL(4*JR-1)), ',', NINT(ZSPEC_ALL(4*JR))
+      ENDDO
+      CLOSE(ISUNIT)
+    ENDIF
+    DEALLOCATE(ZSPEC_ALL, ISPC_CNTS)
+  ENDIF
   DO JA=1,NPRTRW
     IPLAT = 0
     DO JGL=1,D%NULTPP(JA)
@@ -188,8 +220,8 @@ IF(.NOT.D%LWEIGHTED_DISTR) THEN
   ALLOCATE(ZDUM(1))
   ! Cut grid latitudes on Fourier wave-set boundaries only when the opt-in
   ! rectangular decomposition is requested. By default (ECTRANS_RECTANGULAR_
-  ! DECOMP not set) the collars are the stock equal-regions bands, so use
-  ! the native SUMPLATBEQ split. Doesn't apply if LGRIDONLY==true
+  ! DECOMP not set) the collars are the equal-regions bands, so use the
+  ! SUMPLATBEQ split. Doesn't apply if LGRIDONLY==true
   LLFOURIER_BOUNDS = LUSE_RECTANGULAR_DECOMP .AND. .NOT. D%LGRIDONLY
   CALL SUMPLAT(R%NDGL,NPROC,N_REGIONS_NS,MY_REGION_NS,D%LSPLIT,LEQ_REGIONS,&
              &D%NFRSTLAT,D%NLSTLAT,D%NFRSTLOFF,D%NPTRLAT,&
@@ -274,7 +306,7 @@ IF(.NOT.D%LGRIDONLY) THEN
   D%NLENGTF = IOFF
 ENDIF
 
-! One-time dump of grid-point decomposition (rank 1 only)
+! once-only dump of grid-point decomposition (rank 1 only)
 IF (.NOT. LL_GP_DUMPED .AND. MYPROC == 1) THEN
   LL_GP_DUMPED = .TRUE.
   OPEN(NEWUNIT=IDUMP, FILE='grid_gp_decomp.csv', STATUS='REPLACE', ACTION='WRITE')

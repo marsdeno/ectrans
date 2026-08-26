@@ -164,13 +164,15 @@ USE PARKIND1  ,ONLY : JPIM     ,JPRB, JPIB, JPRD
 USE YOMHOOK   ,ONLY : LHOOK,   DR_HOOK, JPHOOK
 
 USE MPL_MODULE  ,ONLY : MPL_RECV, MPL_SEND, MPL_WAIT, JP_NON_BLOCKING_STANDARD, MPL_WAITANY, &
-  &                     JP_BLOCKING_STANDARD, MPL_BARRIER, JP_BLOCKING_BUFFERED, MPL_ALLTOALLV
+  &                     JP_BLOCKING_STANDARD, MPL_BARRIER, JP_BLOCKING_BUFFERED, MPL_ALLTOALLV, &
+  &                     MPL_ALLGATHERV
 USE MPL_GROUPS  ,ONLY : MPL_ALL_LEVS_COMM
 
 USE TPM_GEN         ,ONLY : NTRANS_SYNC_LEVEL, NSTACK_MEMORY_TR, NOUT
-USE TPM_DISTR       ,ONLY : D, MTAGLG, NPRCIDS, MYPROC, NPROC, NPRTRV
-USE TPM_ECTRANS_OPTS,ONLY : LUSE_OPT2, LUSE_OPT3, LUSE_OPT7, LUSE_LEVS_TR, LVERIFY_LEVS_NODE, LREPORT_TR_BW
+USE TPM_DISTR       ,ONLY : D, MTAGLG, NPRCIDS, MYPROC, NPROC, NPRTRV, MYSETW
+USE TPM_ECTRANS_OPTS,ONLY : LUSE_OPT2, LUSE_OPT3, LUSE_OPT7, LUSE_LEVS_TR, LVERIFY_LEVS_NODE, LREPORT_TR_BW, LDUMP_TR_SKEW
 USE TPM_LEVS_TRANSPOSE,ONLY : LEVS_TR_ALIGNED, VERIFY_LEVS_ON_NODE, ACCOUNT_TR_BW, DUMP_TR_SKEW
+USE EQ_REGIONS_MOD  ,ONLY : MY_REGION_NS
 
 USE TRGL_MOD, ONLY: TRGL_BUFFERS, TRGL_VARS, TRGL_ALLOCATE_VARS, TRGL_ALLOCATE_HEAP_BUFFER, &
   &                 TRGL_INIT_VARS, TRGL_INIT_OFF_VARS, TGRL_COPY_ZCOMBUF, TGRL_COPY_PGLAT, &
@@ -246,7 +248,36 @@ INTEGER(KIND=JPIB) :: ICM_CLK0, ICM_CLK1, IPH_CLK0, IPH_CLK1
 ! completion not hidden by the self-copy (idx 5); ZSC_DT = deferred self-copy
 ! span, the OPT3 overlap budget (idx 7); ZBR_DT = pre-issue barrier span, the
 ! load-imbalance skew across the alltoallv comm (idx 9, LREPORT_TR_BW only).
-REAL(KIND=JPRD)    :: ZTR_DT, ZCM_DT, ZWT_DT, ZSC_DT, ZBR_DT
+REAL(KIND=JPRD)    :: ZTR_DT = 0.0_JPRD, ZCM_DT = 0.0_JPRD, ZWT_DT = 0.0_JPRD, ZSC_DT = 0.0_JPRD, ZBR_DT = 0.0_JPRD
+
+! once-only per-rank latitude-slice dump for the send-payload imbalance
+! cross-check (guard: LDUMP_TR_SKEW).
+LOGICAL, SAVE       :: LNLAT_DUMPED = .FALSE.
+REAL(KIND=JPRD)     :: ZNLAT_LOC(4)
+REAL(KIND=JPRD),    ALLOCATABLE :: ZNLAT_ALL(:)
+INTEGER(KIND=JPIM), ALLOCATABLE :: INLAT_CNTS(:)
+INTEGER(KIND=JPIM)  :: INLAT_UNIT, JRT
+
+! once-only per-rank send-payload dump (pack-work proxy) for the L->G
+! direction (guard: LDUMP_TR_SKEW).
+LOGICAL, SAVE       :: LSENDTOT_DUMPED = .FALSE.
+REAL(KIND=JPRD)     :: ZSENDTOT_LOC(1)
+REAL(KIND=JPRD),    ALLOCATABLE :: ZSENDTOT_ALL(:)
+INTEGER(KIND=JPIM), ALLOCATABLE :: ISENDTOT_CNTS(:)
+INTEGER(KIND=JPIM)  :: ISENDTOT_UNIT
+
+! Chunked-exchange prototype (ECTRANS_A2A_CHUNKS=N, opt-in): pipeline the
+! alltoallv over field slabs so chunk k+1 transfers while chunk k unpacks.
+LOGICAL, SAVE       :: LA2A_CHUNKS_INIT = .FALSE.
+INTEGER(KIND=JPIM), SAVE :: NA2A_CHUNKS = 0
+INTEGER(KIND=JPIM), ALLOCATABLE, SAVE :: IREQ_A2A_CH(:)
+! Per-chunk counts/displs: MPI requires them to remain unmodified until the
+! non-blocking collective completes, so each chunk needs its own arrays.
+INTEGER(KIND=JPIM), ALLOCATABLE, SAVE :: ILENS_C(:,:), IOFFS_C(:,:)
+INTEGER(KIND=JPIM), ALLOCATABLE, SAVE :: ILENR_C(:,:), IOFFR_C(:,:)
+INTEGER(KIND=JPIM)  :: NCHUNKS, KFLD_CH, KCHUNK, NCHF
+INTEGER(KIND=JPIM)  :: IST, KFS_PEER, KCH_PEER, JF1, JF2, NCHFR
+CHARACTER(LEN=8)    :: CLCHUNKS
 
 !     ------------------------------------------------------------------
 
@@ -254,7 +285,7 @@ REAL(KIND=JPRD)    :: ZTR_DT, ZCM_DT, ZWT_DT, ZSC_DT, ZBR_DT
 !              --------------------
 ASSOCIATE(KNSEND=>YDBUFS%INSEND, KNRECV=>YDBUFS%INRECV, KSENDTOT=>YDBUFS%ISENDTOT, &
   &       KRECVTOT=>YDBUFS%IRECVTOT, KSEND=>YDBUFS%ISEND, KRECV=>YDBUFS%IRECV, &
-  &       KINDEX=>YDBUFS%IINDEX, KNDOFF=>YDBUFS%INDOFF)
+  &       KINDEX=>YDBUFS%IINDEX, KNDOFF=>YDBUFS%INDOFF, KIPOS=>YDBUFS%IPOSPLUS)
 
 IF (NSTACK_MEMORY_TR == 0) THEN
   CALL TRGL_ALLOCATE_HEAP_BUFFER(ZCOMBUFS_HEAP, YDBUFS%ISENDCOUNT, YDBUFS%INSEND)
@@ -308,8 +339,6 @@ CALL TRGL_INIT_VARS(YLVARS, KF_SCALARS_G, PGP, PGPUV, PGP3A, PGP3B, PGP2)
 CALL GSTATS(1806,1)
 
 ! Copy local contribution
-
-! Copy local contribution
 !
 ! OPT3: when LUSE_OPT3, defer the self-copy until after the nonblocking
 ! alltoallv has been posted so it can overlap with the collective. The self-
@@ -337,6 +366,35 @@ IF (LUSE_OPT2) THEN
   ! OPT2: single MPL_ALLTOALLV replaces the per-peer ISEND / IRECV / WAITANY
   ! Buffer layout unchanged, so TGRL_COPY_ZCOMBUF unpack works
   ! bit-identically
+
+  ! Chunked-exchange prototype (ECTRANS_A2A_CHUNKS=N, opt-in): pipeline the
+  ! alltoallv over field slabs. Requires the global-comm path (no LEVS) and
+  ! NPROC > 1; otherwise fall back to the single exchange.
+  IF (.NOT. LA2A_CHUNKS_INIT) THEN
+    LA2A_CHUNKS_INIT = .TRUE.
+    CLCHUNKS = ''
+    CALL GET_ENVIRONMENT_VARIABLE('ECTRANS_A2A_CHUNKS', CLCHUNKS)
+    IF (LEN_TRIM(CLCHUNKS) > 0) READ(CLCHUNKS,'(I8)') NA2A_CHUNKS
+  ENDIF
+  NCHUNKS = NA2A_CHUNKS
+  IF (NCHUNKS > 1) THEN
+    IF (.NOT. LLEVS .AND. NPROC > 1 .AND. KF_FS > 1) THEN
+      NCHUNKS = MIN(NCHUNKS, KF_FS)
+      KFLD_CH = (KF_FS + NCHUNKS - 1)/NCHUNKS
+      NCHUNKS = (KF_FS + KFLD_CH - 1)/KFLD_CH
+      IF (.NOT. ALLOCATED(IREQ_A2A_CH)) THEN
+        ALLOCATE(IREQ_A2A_CH(NCHUNKS))
+        ALLOCATE(ILENS_C(NPROC,NCHUNKS), IOFFS_C(NPROC,NCHUNKS))
+        ALLOCATE(ILENR_C(NPROC,NCHUNKS), IOFFR_C(NPROC,NCHUNKS))
+      ENDIF
+    ELSE
+      NCHUNKS = 1
+    ENDIF
+  ELSE
+    NCHUNKS = 1
+  ENDIF
+
+  IF (NCHUNKS == 1) THEN
 
   !....Pack loop..........................................................
 
@@ -489,7 +547,7 @@ IF (LUSE_OPT2) THEN
     IF (LHOOK) CALL DR_HOOK('TRLTOG_A2A',1,ZHOOK_HANDLE_A2A)
   ENDIF
 
-  ! Deferred self-copy (runs in the shadow of IALLTOALLV when LUSE_OPT3).
+  ! Deferred self-copy
   ! Timer 1604 accounting is unchanged; only the wall-clock position moves.
   IF (LLOVERLAP .AND. KRECVTOT(MYPROC) > 0) THEN
     CALL TRGL_INIT_OFF_VARS(YDBUFS,YLVARS,KVSET,KPTRGP,KF_GP)
@@ -526,6 +584,129 @@ IF (LUSE_OPT2) THEN
     CALL TGRL_COPY_ZCOMBUF(YDBUFS, YLVARS, INR, ZCOMBUFR, KPTRGP, PGP, PGPUV, PGP3A, PGP3B, PGP2)
   ENDDO
   IF (LHOOK) CALL DR_HOOK('TRLTOG_UNPACK',1,ZHOOK_HANDLE_UNPACK)
+
+  ELSE
+    ! ---- Chunked pipeline (prototype): pack(k) -> issue(k), keeping a
+    ! single outstanding non-blocking collective at a time (weird problems
+    ! with HPC-X nbc otherwise): pack(k+1) overlaps the exchange of chunk k;
+    ! wait(k) -> unpack(k) before issue(k+1).
+    ZSEND_1D(1:SIZE(ZCOMBUFS)) => ZCOMBUFS
+    ZRECV_1D(1:SIZE(ZCOMBUFR)) => ZCOMBUFR
+
+    IF (LHOOK) CALL DR_HOOK('TRLTOG_PACK',0,ZHOOK_HANDLE_PACK)
+    CALL TGRL_INIT_PACKING_VARS(YDBUFS,YLVARS, KVSET, KF_GP)
+    DO KCHUNK=1,NCHUNKS
+      ISEND_FLD_START = (KCHUNK-1)*KFLD_CH + 1
+      ISEND_FLD_END   = MIN(KCHUNK*KFLD_CH, KF_FS)
+      DO INS=1,KNSEND
+        ISEND=KSEND(INS)
+        ILEN = KSENDTOT(ISEND)/KF_FS
+        IF (LUSE_OPT7) THEN
+          I_KNDOFF_ISEND = KNDOFF(ISEND)
+          !$OMP PARALLEL DO SCHEDULE(STATIC) PRIVATE(JFLD,JL,II)
+          DO JL=1,ILEN
+            II = KINDEX(I_KNDOFF_ISEND+JL)
+            DO JFLD=ISEND_FLD_START,ISEND_FLD_END
+              ZCOMBUFS((JFLD-1)*ILEN+JL,INS) = PGLAT(JFLD,II)
+            ENDDO
+          ENDDO
+          !$OMP END PARALLEL DO
+        ELSE
+          !$OMP PARALLEL DO SCHEDULE(STATIC) PRIVATE(JFLD,JL,II)
+          DO JL=1,ILEN
+            II = KINDEX(KNDOFF(ISEND)+JL)
+            DO JFLD=ISEND_FLD_START,ISEND_FLD_END
+              ZCOMBUFS((JFLD-1)*ILEN+JL,INS) = PGLAT(JFLD,II)
+            ENDDO
+          ENDDO
+          !$OMP END PARALLEL DO
+        ENDIF
+        IF (KCHUNK == 1) THEN
+          ZCOMBUFS(-1,INS) = 1
+          ZCOMBUFS(0,INS)  = KF_FS
+        ENDIF
+      ENDDO
+      ! Per-chunk counts/displs (global comm; chunk 1 carries the headers).
+      NCHF = ISEND_FLD_END - ISEND_FLD_START + 1
+      ILENS_C(:,KCHUNK) = 0
+      IOFFS_C(:,KCHUNK) = 0
+      ILENR_C(:,KCHUNK) = 0
+      IOFFR_C(:,KCHUNK) = 0
+      DO INS=1,KNSEND
+        JP = KSEND(INS)
+        ILEN = KSENDTOT(JP)/KF_FS
+        IF (KCHUNK == 1) THEN
+          ILENS_C(JP,KCHUNK) = 2 + NCHF * ILEN
+          IOFFS_C(JP,KCHUNK) = (INS-1) * (YDBUFS%ISENDCOUNT + 2)
+        ELSE
+          ILENS_C(JP,KCHUNK) = NCHF * ILEN
+          IOFFS_C(JP,KCHUNK) = (INS-1) * (YDBUFS%ISENDCOUNT + 2) + 2 + (ISEND_FLD_START-1) * ILEN
+        ENDIF
+      ENDDO
+      DO INR=1,KNRECV
+        JP = KRECV(INR)
+        ! The peer's segment geometry uses the SENDER's field count, which
+        ! differs from this rank's KF_FS: derive it from the true per-field
+        ! stride (IPOSPLUS) and the peer's total.
+        IST = KIPOS(INR)
+        KFS_PEER = KRECVTOT(JP)/IST
+        KCH_PEER = (KFS_PEER + NCHUNKS - 1)/NCHUNKS
+        JF1 = (KCHUNK-1)*KCH_PEER + 1
+        JF2 = MIN(KCHUNK*KCH_PEER, KFS_PEER)
+        NCHFR = JF2 - JF1 + 1
+        IF (KCHUNK == 1) THEN
+          ILENR_C(JP,KCHUNK) = 2 + NCHFR * IST
+          IOFFR_C(JP,KCHUNK) = (INR-1) * (YDBUFS%IRECVCOUNT + 2)
+        ELSE
+          ILENR_C(JP,KCHUNK) = NCHFR * IST
+          IOFFR_C(JP,KCHUNK) = (INR-1) * (YDBUFS%IRECVCOUNT + 2) + 2 + (JF1-1) * IST
+        ENDIF
+      ENDDO
+      IF (KCHUNK > 1) THEN
+        CALL MPL_WAIT(KREQUEST=IREQ_A2A_CH(KCHUNK-1), CDSTRING='TRLTOG_COMM: WAIT CHUNK')
+        IF (LHOOK) CALL DR_HOOK('TRLTOG_UNPACK',0,ZHOOK_HANDLE_UNPACK)
+        DO INR=1,KNRECV
+          JP = KRECV(INR)
+          IST = KIPOS(INR)
+          KFS_PEER = KRECVTOT(JP)/IST
+          KCH_PEER = (KFS_PEER + NCHUNKS - 1)/NCHUNKS
+          CALL TGRL_COPY_ZCOMBUF(YDBUFS, YLVARS, INR, ZCOMBUFR, KPTRGP, PGP, PGPUV, PGP3A, PGP3B, PGP2, &
+            &                  KF1=(KCHUNK-2)*KCH_PEER+1, KF2=MIN((KCHUNK-1)*KCH_PEER, KFS_PEER))
+        ENDDO
+        IF (LHOOK) CALL DR_HOOK('TRLTOG_UNPACK',1,ZHOOK_HANDLE_UNPACK)
+      ENDIF
+      IF (LHOOK) CALL DR_HOOK('TRLTOG_A2A',0,ZHOOK_HANDLE_A2A)
+      CALL MPL_ALLTOALLV(PSENDBUF=ZSEND_1D, KSENDCOUNTS=ILENS_C(:,KCHUNK), KSENDDISPL=IOFFS_C(:,KCHUNK), &
+        &                PRECVBUF=ZRECV_1D, KRECVCOUNTS=ILENR_C(:,KCHUNK), KRECVDISPL=IOFFR_C(:,KCHUNK), &
+        &                KMP_TYPE=JP_NON_BLOCKING_STANDARD, KREQUEST=IREQ_A2A_CH(KCHUNK), &
+        &                CDSTRING='TRLTOG_COMM: IALLTOALLV(CHUNK)')
+      IF (LHOOK) CALL DR_HOOK('TRLTOG_A2A',1,ZHOOK_HANDLE_A2A)
+    ENDDO
+    IF (LHOOK) CALL DR_HOOK('TRLTOG_PACK',1,ZHOOK_HANDLE_PACK)
+
+    ! Deferred self-copy in the shadow of the last in-flight chunk.
+    IF (KRECVTOT(MYPROC) > 0) THEN
+      CALL TRGL_INIT_OFF_VARS(YDBUFS,YLVARS,KVSET,KPTRGP,KF_GP)
+      IF (LHOOK) CALL DR_HOOK('TRLTOG_SELF',0,ZHOOK_HANDLE_SELF)
+      CALL GSTATS(1604,0)
+      CALL TGRL_COPY_PGLAT(PGLAT, YDBUFS, YLVARS, PGP, PGPUV,PGP3A, PGP3B,PGP2)
+      CALL GSTATS(1604,1)
+      IF (LHOOK) CALL DR_HOOK('TRLTOG_SELF',1,ZHOOK_HANDLE_SELF)
+    ENDIF
+
+    ! Wait + unpack the last chunk.
+    CALL MPL_WAIT(KREQUEST=IREQ_A2A_CH(NCHUNKS), CDSTRING='TRLTOG_COMM: WAIT LAST CHUNK')
+    IF (LHOOK) CALL DR_HOOK('TRLTOG_UNPACK',0,ZHOOK_HANDLE_UNPACK)
+    DO INR=1,KNRECV
+      JP = KRECV(INR)
+      IST = KIPOS(INR)
+      KFS_PEER = KRECVTOT(JP)/IST
+      KCH_PEER = (KFS_PEER + NCHUNKS - 1)/NCHUNKS
+      CALL TGRL_COPY_ZCOMBUF(YDBUFS, YLVARS, INR, ZCOMBUFR, KPTRGP, PGP, PGPUV, PGP3A, PGP3B, PGP2, &
+        &                  KF1=(NCHUNKS-1)*KCH_PEER+1, KF2=KFS_PEER)
+    ENDDO
+    IF (LHOOK) CALL DR_HOOK('TRLTOG_UNPACK',1,ZHOOK_HANDLE_UNPACK)
+  ENDIF
 
 ELSE
   ! original point-to-point path
@@ -614,10 +795,55 @@ IF (LREPORT_TR_BW) THEN
     ITR_BYTES = ITR_BYTES + INT(KSENDTOT(KSEND(INS)), JPIB)
   ENDDO
   ITR_BYTES = ITR_BYTES * INT(STORAGE_SIZE(1.0_JPRB)/8, JPIB)
+  ! once-only dump of every rank's latitude slice (wave-set, a-set and its
+  ! first/last latitude), to locate the send-payload imbalance within the
+  ! eq-regions partition.
+  IF (LDUMP_TR_SKEW .AND. .NOT. LNLAT_DUMPED) THEN
+    LNLAT_DUMPED = .TRUE.
+    ZNLAT_LOC(1) = REAL(MYSETW, JPRD)
+    ZNLAT_LOC(2) = REAL(MY_REGION_NS, JPRD)
+    ZNLAT_LOC(3) = REAL(D%NFRSTLAT(MY_REGION_NS), JPRD)
+    ZNLAT_LOC(4) = REAL(D%NLSTLAT(MY_REGION_NS), JPRD)
+    ALLOCATE(ZNLAT_ALL(4*NPROC), INLAT_CNTS(NPROC))
+    INLAT_CNTS(:) = 4
+    CALL MPL_ALLGATHERV(ZNLAT_LOC(1:4), ZNLAT_ALL, INLAT_CNTS, CDSTRING='NLAT: GATHER')
+    IF (MYPROC == 1) THEN
+      OPEN(NEWUNIT=INLAT_UNIT, FILE='tr_nlat.csv', STATUS='REPLACE', ACTION='WRITE')
+      WRITE(INLAT_UNIT,'(A,I0)') '# per-rank latitude slice; nproc=', NPROC
+      WRITE(INLAT_UNIT,'(A)') 'rank,mysetw,a_set,first_lat,last_lat,nlat'
+      DO JRT = 1, NPROC
+        WRITE(INLAT_UNIT,'(I0,5(A,I0))') JRT, ',', NINT(ZNLAT_ALL(4*JRT-3)), ',', NINT(ZNLAT_ALL(4*JRT-2)), &
+          & ',', NINT(ZNLAT_ALL(4*JRT-1)), ',', NINT(ZNLAT_ALL(4*JRT)), &
+          & ',', NINT(ZNLAT_ALL(4*JRT))-NINT(ZNLAT_ALL(4*JRT-1))+1
+      ENDDO
+      CLOSE(INLAT_UNIT)
+    ENDIF
+    DEALLOCATE(ZNLAT_ALL, INLAT_CNTS)
+  ENDIF
+  ! once only dump of every rank's send payload (elements) for the L->G
+  ! direction (guard: LDUMP_TR_SKEW).
+  IF (LDUMP_TR_SKEW .AND. .NOT. LSENDTOT_DUMPED) THEN
+    LSENDTOT_DUMPED = .TRUE.
+    ZSENDTOT_LOC(1) = REAL(ITR_BYTES / INT(STORAGE_SIZE(1.0_JPRB)/8, JPIB), JPRD)
+    ALLOCATE(ZSENDTOT_ALL(NPROC), ISENDTOT_CNTS(NPROC))
+    ISENDTOT_CNTS(:) = 1
+    CALL MPL_ALLGATHERV(ZSENDTOT_LOC(1:1), ZSENDTOT_ALL, ISENDTOT_CNTS, &
+      &                 CDSTRING='TRLTOG_COMM: SENDTOT GATHER')
+    IF (MYPROC == 1) THEN
+      OPEN(NEWUNIT=ISENDTOT_UNIT, FILE='tr_sendtot.csv', STATUS='REPLACE', ACTION='WRITE')
+      WRITE(ISENDTOT_UNIT,'(A,I0)') '# per-rank TRLTOG send payload [elements]; nproc=', NPROC
+      WRITE(ISENDTOT_UNIT,'(A)') 'rank,sendtot'
+      DO JRT = 1, NPROC
+        WRITE(ISENDTOT_UNIT,'(I0,A,F20.1)') JRT, ',', ZSENDTOT_ALL(JRT)
+      ENDDO
+      CLOSE(ISENDTOT_UNIT)
+    ENDIF
+    DEALLOCATE(ZSENDTOT_ALL, ISENDTOT_CNTS)
+  ENDIF
   CALL ACCOUNT_TR_BW(1, 'TRLTOG (L->G, g157)', ITR_BYTES, ZTR_DT)
   ! Comm exchange only (LEVS/global alltoallv), same payload.
   IF (NPROC > 1) CALL ACCOUNT_TR_BW(3, 'TRLTOG-COMM (g157 issue)', ITR_BYTES, ZCM_DT)
-  ! Opt3 decomposition: WAIT = comm completion not hidden by the self-copy;
+  ! OPT3 decomposition: WAIT = comm completion not hidden by the self-copy;
   ! SELF = the deferred self-copy overlapped against the alltoallv. Only the
   ! time field is meaningful (payload is the whole-transpose payload).
   IF (NPROC > 1) CALL ACCOUNT_TR_BW(5, 'TRLTOG-WAIT (g157 unhidden comm)', ITR_BYTES, ZWT_DT)
