@@ -44,6 +44,7 @@ REAL(KIND=JPRD)   ,INTENT(OUT) :: PNONIM(:,:)  ! Non-identity part of projection
 
 INTEGER(KIND=JPIM) :: JM,JN
 REAL(KIND=JPRD) :: ZR(KM,KN)
+REAL(KIND=JPRD) :: ZDTOL
 REAL(KIND=JPRD),ALLOCATABLE :: ZS(:,:),ZT(:,:)
 !----------------------------------------------------------------------------
 !Avoid destroying input matrix
@@ -56,6 +57,25 @@ DO JN=1,KN
     ZR(JM,JN) = 0.0_JPRD
   ENDDO
 ENDDO
+! Robustness: enforce the ALG541 numerical-rank criterion on the actual R
+! diagonal. The running column-norm rank test can (through round-off, or Intel
+! FTZ flushing a subnormal to 0) retain a column whose R diagonal R(i,i) is zero
+! or negligible for some i<=KRANK. That makes the upper-triangular ZS singular
+! and the DTRSM below divide by (near-)zero -> SIGFPE / non-finite ID. 
+! This issue has been observed at 2559 with large NPRTRV. 
+! Column-pivoted QR gives |R(1,1)|>=...>=|R(KRANK,KRANK)|, so drop the trailing
+! columns from the first diagonal below EPSILON*|R(1,1)|. Legitimately-retained
+!diagonals are ~PEPS*|R(1,1)| >> EPSILON*|R(1,1)|, so well-conditioned blocks are
+! unaffected; only degenerate blocks are truncated.
+IF (KRANK > 1) THEN
+  ZDTOL = ABS(ZR(1,1))*EPSILON(1.0_JPRD)
+  DO JN=2,KRANK
+    IF (ABS(ZR(JN,JN)) < ZDTOL) THEN
+      KRANK = JN-1
+      EXIT
+    ENDIF
+  ENDDO
+ENDIF
 ! S leftmost kxk block of R
 ALLOCATE(ZS(KRANK,KRANK))
 DO JN=1,KRANK
