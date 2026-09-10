@@ -62,6 +62,7 @@ SUBROUTINE SUPOLF(KM,KNSMAX,DDMU,DDPOL,KCHEAP)
 USE EC_PARKIND  ,ONLY : JPRD, JPIM
 
 USE TPM_POL   ,ONLY : DFI, DFB, DFG, DFA, DFF
+USE IEEE_ARITHMETIC, ONLY : IEEE_IS_FINITE
 
 IMPLICIT NONE
 
@@ -210,6 +211,11 @@ ELSE
     ! symmetric case
     DO JN=KM+2,KNSMAX-2,2
       
+      ! Correct non-finite values (NaN or Inf) surviving from an
+      ! earlier step of the recurrence (seen intermittently with -fpe0
+      ! trapping at large OMP thread count at high truncation).
+      IF (.NOT. IEEE_IS_FINITE(DDPOL(JN-2))) DDPOL(JN-2) = ZEPS
+      IF (.NOT. IEEE_IS_FINITE(DDPOL(JN))) DDPOL(JN) = ZEPS
       IF( ABS(DDPOL(JN-2)) > ZSCALE ) THEN
         DDPOL(JN-2)=DDPOL(JN-2)/ZSCALE
         DDPOL(JN)=DDPOL(JN)/ZSCALE
@@ -220,6 +226,7 @@ ELSE
     ENDDO
 
     DO JN=KM,KNSMAX,2
+      IF (.NOT. IEEE_IS_FINITE(DDPOL(JN))) DDPOL(JN) = ZEPS  ! protect against non-finite
       DO JCORR=1,ICORR(JN)
         DDPOL(JN)=DDPOL(JN)/ZSCALE
         IF( DDPOL(JN) < ZEPS ) THEN
@@ -232,6 +239,11 @@ ELSE
     ! antisymmetric case
     DO JN=KM+3,KNSMAX-2,2
       
+      ! Correct non-finite values (NaN or Inf) surviving from an
+      ! earlier step of the recurrence (seen intermittently with -fpe0
+      ! trapping at large OMP thread count at high truncation).
+      IF (.NOT. IEEE_IS_FINITE(DDPOL(JN-2))) DDPOL(JN-2) = ZEPS
+      IF (.NOT. IEEE_IS_FINITE(DDPOL(JN))) DDPOL(JN) = ZEPS
       IF( ABS(DDPOL(JN-2)) > ZSCALE ) THEN
         DDPOL(JN-2)=DDPOL(JN-2)/ZSCALE
         DDPOL(JN)=DDPOL(JN)/ZSCALE
@@ -242,6 +254,7 @@ ELSE
     ENDDO
 
     DO JN=KM+1,KNSMAX,2
+      IF (.NOT. IEEE_IS_FINITE(DDPOL(JN))) DDPOL(JN) = ZEPS  ! protect against non-finite
       DO JCORR=1,ICORR(JN)
         DDPOL(JN)=DDPOL(JN)/ZSCALE
         IF( DDPOL(JN) < ZEPS ) THEN
@@ -253,6 +266,15 @@ ELSE
   ELSE
     DO JN=KM+2,KNSMAX-2
       
+      ! Correct non-finite values (NaN or Inf) surviving from an
+      ! earlier step of the recurrence (seen intermittently with -fpe0
+      ! trapping at large OMP thread count at high truncation).
+      ! Check all four elements of the slice DDPOL(JN-2:JN+1) that
+      ! participate in the rescaling below and the recurrence divide.
+      IF (.NOT. IEEE_IS_FINITE(DDPOL(JN-2))) DDPOL(JN-2) = ZEPS
+      IF (.NOT. IEEE_IS_FINITE(DDPOL(JN-1))) DDPOL(JN-1) = ZEPS
+      IF (.NOT. IEEE_IS_FINITE(DDPOL(JN))) DDPOL(JN) = ZEPS
+      IF (.NOT. IEEE_IS_FINITE(DDPOL(JN+1))) DDPOL(JN+1) = ZEPS
       IF( ABS(DDPOL(JN-2)) > ZSCALE ) THEN
         DDPOL(JN-2)=DDPOL(JN-2)/ZSCALE
         DDPOL(JN-1)=DDPOL(JN-1)/ZSCALE
@@ -266,6 +288,7 @@ ELSE
     ENDDO
 
     DO JN=KM,KNSMAX
+      IF (.NOT. IEEE_IS_FINITE(DDPOL(JN))) DDPOL(JN) = ZEPS  ! protect against non-finite
       DO JCORR=1,ICORR(JN)
         DDPOL(JN)=DDPOL(JN)/ZSCALE
         IF( DDPOL(JN) < ZEPS ) THEN
