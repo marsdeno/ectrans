@@ -118,6 +118,7 @@ logical :: lstack = .false. ! Output stack info
 logical :: luserpnm = .false.
 logical :: lkeeprpnm = .false.
 logical :: luseflt = .false. ! Use fast legendre transforms
+logical :: lall_fftw = .true. ! transform all fields in one call if true, transform them sequentially if false
 logical :: ltrace_stats = .false.
 logical :: lstats_omp = .false.
 logical :: lstats_comms = .false.
@@ -403,7 +404,7 @@ call set_ectrans_gpu_nflev(nflevl)
   ! In long run, ectrans should grow its internal buffers automatically
 call setup_trans(ksmax=nsmax, kdgl=ndgl, kloen=nloen, ldsplit=.true.,       &
   &              lduserpnm=luserpnm, ldkeeprpnm=lkeeprpnm, &
-  &              lduseflt=luseflt)
+  &              lduseflt=luseflt, ld_all_fftw=lall_fftw)
 call gstats(2, 1)
 
 call trans_inq(kspec2=nspec2, kspec2g=nspec2g, kgptot=ngptot, kgptotg=ngptotg)

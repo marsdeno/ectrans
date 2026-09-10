@@ -10,7 +10,7 @@
 
 MODULE FTDIRAD_MOD
 CONTAINS
-SUBROUTINE FTDIRAD(PREEL,KFIELDS,KGL)
+SUBROUTINE FTDIRAD(PREEL,KFIELDS,KGL,KPLAN)
 
 
 !**** *FTDIRAD - Direct Fourier transform
@@ -24,6 +24,8 @@ SUBROUTINE FTDIRAD(PREEL,KFIELDS,KGL)
 
 !        Explicit arguments :  PREEL   - Fourier/grid-point array
 !        --------------------  KFIELDS - number of fields
+!                              KGL     - latitude index
+!                              KPLAN   - optional pre-resolved FFTW plan
 
 !     Method.
 !     -------
@@ -45,7 +47,7 @@ SUBROUTINE FTDIRAD(PREEL,KFIELDS,KGL)
 !        R. El Khatib  08-Jun-2023 LALL_FFTW for better flexibility
 !     ------------------------------------------------------------------
 
-USE PARKIND1  ,ONLY : JPIM, JPRB
+USE PARKIND1  ,ONLY : JPIM, JPIB, JPRB
 
 USE TPM_DISTR       ,ONLY : D, MYSETW
 USE TPM_GEOMETRY    ,ONLY : G
@@ -56,6 +58,7 @@ IMPLICIT NONE
 
 INTEGER(KIND=JPIM),INTENT(IN)  :: KFIELDS,KGL
 REAL(KIND=JPRB), INTENT(INOUT) :: PREEL(:,:)
+INTEGER(KIND=JPIB),INTENT(IN), OPTIONAL :: KPLAN
 
 INTEGER(KIND=JPIM) :: IGLG,IST,ILEN,JJ,JF,ILOEN
 INTEGER(KIND=JPIM) :: IOFF,IRLEN,ICLEN,ITYPE
@@ -77,7 +80,11 @@ DO JJ=1,ILEN
   ENDDO
 ENDDO
 
-CALL EXEC_FFTW(ITYPE,IRLEN,ICLEN,IOFF,KFIELDS,TW%LALL_FFTW,PREEL)
+IF (PRESENT(KPLAN)) THEN
+  CALL EXEC_FFTW(ITYPE,IRLEN,ICLEN,IOFF,KFIELDS,TW%LALL_FFTW,PREEL,KPLAN)
+ELSE
+  CALL EXEC_FFTW(ITYPE,IRLEN,ICLEN,IOFF,KFIELDS,TW%LALL_FFTW,PREEL)
+ENDIF
 
   ! Change of metric (not in forward routine)
 

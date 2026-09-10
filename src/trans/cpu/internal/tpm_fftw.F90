@@ -1,6 +1,6 @@
 ! (C) Copyright 2000- ECMWF.
 ! (C) Copyright 2000- Meteo-France.
-! 
+!
 ! This software is licensed under the terms of the Apache Licence Version 2.0
 ! which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
 ! In applying this licence, ECMWF does not waive the privileges and immunities
@@ -14,7 +14,7 @@ MODULE TPM_FFTW
 !     George Mozdzynski
 !
 !   Modifications.
-!   -------------- 
+!   --------------
 !     Original      October 2014
 !     R. El Khatib 01-Sep-2015 More subroutines for better modularity
 !        R. El Khatib  08-Jun-2023 LALL_FFTW for better flexibility
@@ -22,8 +22,10 @@ MODULE TPM_FFTW
 USE, INTRINSIC :: ISO_C_BINDING
 
 USE PARKIND1   ,ONLY : JPIB, JPIM, JPRB, JPRD
-USE MPL_MODULE ,ONLY : MPL_MYRANK
+USE MPL_MODULE ,ONLY : MPL_MYRANK, MPL_RANK, MPL_NUMPROC, &
+  & MPL_SEND, MPL_RECV
 USE YOMHOOK    ,ONLY : LHOOK, DR_HOOK, JPHOOK
+USE OMP_LIB    ,ONLY : OMP_GET_MAX_THREADS, OMP_GET_THREAD_NUM
 
 IMPLICIT NONE
 
@@ -61,6 +63,38 @@ END TYPE FFTW_PLAN
 TYPE(FFTW_TYPE),ALLOCATABLE,TARGET :: FFTW_RESOL(:)
 TYPE(FFTW_TYPE),POINTER     :: TW
 
+! per-thread persistent FFTW scratch buffers, allocated once in INIT_PLANS_FFTW, grows
+! on demand in ENSURE_FFT_BUFFER, and freed in DESTROY_PLANS_FFTW
+! Replaces per-call FFTW_ALLOC_COMPLEX/FFTW_FREE in EXEC_FFTW / EXEC_EFFTW
+TYPE(C_PTR),       ALLOCATABLE, SAVE :: ZFFT_PERSIST_PTRS(:)
+INTEGER(C_SIZE_T), ALLOCATABLE, SAVE :: ZFFT_PERSIST_CAPS(:)
+
+! FFTW planning + wisdom storing. Controlled with ECTRANS_FFTW_WISDOM environment variable:
+!   * CREATE_PLAN_FFTW uses FFTW_MEASURE (very slow first time-step in initial run, faster ffts subsequently)
+!   * INIT_PLANS_FFTW imports wisdom from <ECTRANS_FFTW_WISDOM>.{dp,sp} it file is present
+!   * DESTROY_PLANS_FFTW exports same <ECTRANS_FFTW_WISDOM>.{dp,sp} file
+!   * Bit reproducibility is obtained if wisdom file doesn't change between runs
+!   * EXEC_FFTW / EXEC_EFFTW use a hoisted ZINV = 1/KRLEN reciprocal-
+!     multiply in the output scale loop (last-bit different from the
+!     division form, but reproducible).
+! Default (and unset ECTRANS_FFTW_WISDOM) behaviour: FFTW_ESTIMATE+FFTW_NO_SIMD, no wisdom I/O,
+LOGICAL, SAVE :: LUSE_MEASURE     = .FALSE.
+LOGICAL, SAVE :: LWISDOM_IMPORTED = .FALSE.
+
+! Bytes-per-word for the dense 4-bytes-per-JPIM packing used by the
+! wisdom transport code below.
+INTEGER(KIND=JPIM), PARAMETER :: IBPW_WISDOM = 4
+
+
+! libc free() for releasing the malloc'd string returned by
+! fftw{,f}_export_wisdom_to_string
+INTERFACE
+  SUBROUTINE C_FREE(PTR) BIND(C, NAME='free')
+    IMPORT :: C_PTR
+    TYPE(C_PTR), VALUE :: PTR
+  END SUBROUTINE C_FREE
+END INTERFACE
+
 
 
 ! ------------------------------------------------------------------
@@ -68,8 +102,269 @@ CONTAINS
 ! ------------------------------------------------------------------
 
 
+SUBROUTINE WISDOM_FILENAME(CDPATH, KSTAT)
+CHARACTER(LEN=:), ALLOCATABLE, INTENT(OUT) :: CDPATH
+INTEGER(KIND=JPIM),            INTENT(OUT) :: KSTAT
+CHARACTER(LEN=4096) :: ZBUF
+INTEGER :: ILEN, ISTAT
+
+CALL GET_ENVIRONMENT_VARIABLE('ECTRANS_FFTW_WISDOM', VALUE=ZBUF, &
+  & LENGTH=ILEN, STATUS=ISTAT)
+IF (ISTAT /= 0 .OR. ILEN == 0 .OR. ILEN > LEN(ZBUF)) THEN
+  KSTAT = 1
+  RETURN
+ENDIF
+IF (JPRB == JPRD) THEN
+  CDPATH = ZBUF(1:ILEN) // '.dp'
+ELSE
+  CDPATH = ZBUF(1:ILEN) // '.sp'
+ENDIF
+KSTAT = 0
+END SUBROUTINE WISDOM_FILENAME
+
+
+! Convert a Fortran character string to a contiguous, NUL-terminated
+! CHARACTER(KIND=C_CHAR) array compatible with `const char *filename`
+SUBROUTINE STR_TO_CSTR(CDIN, CDOUT)
+CHARACTER(LEN=*),                    INTENT(IN)  :: CDIN
+CHARACTER(KIND=C_CHAR), ALLOCATABLE, INTENT(OUT) :: CDOUT(:)
+INTEGER(KIND=JPIM) :: IL, J
+IL = LEN_TRIM(CDIN)
+ALLOCATE(CDOUT(IL+1))
+DO J = 1, IL
+  CDOUT(J) = CDIN(J:J)
+END DO
+CDOUT(IL+1) = C_NULL_CHAR
+END SUBROUTINE STR_TO_CSTR
+
+
+! Import FFTW wisdom from <ECTRANS_FFTW_WISDOM>.{dp,sp}. All ranks
+! read the file.
+SUBROUTINE IMPORT_FFTW_WISDOM
+CHARACTER(LEN=:),       ALLOCATABLE :: ZPATH
+CHARACTER(KIND=C_CHAR), ALLOCATABLE :: ZCPATH(:)
+INTEGER(KIND=JPIM) :: ISTAT
+INTEGER(C_INT)     :: IRET
+LOGICAL            :: LLPRINT
+
+IF (LWISDOM_IMPORTED) RETURN
+CALL WISDOM_FILENAME(ZPATH, ISTAT)
+IF (ISTAT /= 0) RETURN
+CALL STR_TO_CSTR(ZPATH, ZCPATH)
+
+IF (JPRB == JPRD) THEN
+  IRET = FFTW_IMPORT_WISDOM_FROM_FILENAME(ZCPATH)
+ELSE
+  IRET = FFTWF_IMPORT_WISDOM_FROM_FILENAME(ZCPATH)
+ENDIF
+! Mark imported even on failure: missing/malformed file should not be
+! retried on subsequent resolution setups.
+LWISDOM_IMPORTED = .TRUE.
+LLPRINT = (MPL_NUMPROC < 1) .OR. (MPL_RANK == 1)
+IF (LLPRINT) THEN
+  IF (IRET == 1) THEN
+    WRITE(0,'(A,A)') 'TPM_FFTW: imported FFTW wisdom from ', TRIM(ZPATH)
+  ELSE
+    WRITE(0,'(A,A,A)') &
+      & 'TPM_FFTW: WARNING failed to import FFTW wisdom from ', &
+      & TRIM(ZPATH), ' (continuing with empty wisdom)'
+  ENDIF
+ENDIF
+END SUBROUTINE IMPORT_FFTW_WISDOM
+
+
+! Export the current FFTW planner's wisdom to a packed JPIM word buffer.
+! Returns an allocated IBUF (word-array), IWORDS (word count) and
+! ILEN_BYTES (actual NUL-terminated byte length). Bytes beyond ILEN_BYTES
+! within the last word are zero-padded and never read on the unpack
+! side. The FFTW C string is malloc'd and freed here via C_FREE.
+SUBROUTINE PACK_LOCAL_WISDOM(IBUF, IWORDS, ILEN_BYTES)
+INTEGER(KIND=JPIM), ALLOCATABLE, INTENT(OUT) :: IBUF(:)
+INTEGER(KIND=JPIM),              INTENT(OUT) :: IWORDS
+INTEGER(KIND=JPIM),              INTENT(OUT) :: ILEN_BYTES
+CHARACTER(KIND=C_CHAR), POINTER :: ZLOC(:)
+TYPE(C_PTR)        :: IPTR
+INTEGER(KIND=JPIM) :: JJ, IHUGE, IWORD, IBPOS
+
+IF (JPRB == JPRD) THEN
+  IPTR = FFTW_EXPORT_WISDOM_TO_STRING()
+ELSE
+  IPTR = FFTWF_EXPORT_WISDOM_TO_STRING()
+ENDIF
+
+ILEN_BYTES = 0
+IF (C_ASSOCIATED(IPTR)) THEN
+  IHUGE = 16 * 1024 * 1024 !! 16 MB
+  CALL C_F_POINTER(IPTR, ZLOC, [IHUGE])
+  DO JJ = 1, IHUGE
+    IF (ZLOC(JJ) == C_NULL_CHAR) EXIT
+    ILEN_BYTES = ILEN_BYTES + 1
+  ENDDO
+ENDIF
+
+IWORDS = (ILEN_BYTES + IBPW_WISDOM - 1) / IBPW_WISDOM
+ALLOCATE(IBUF(MAX(IWORDS, 1)))
+IBUF(:) = 0
+DO JJ = 1, ILEN_BYTES
+  IWORD = (JJ - 1) / IBPW_WISDOM + 1
+  IBPOS = MOD(JJ - 1, IBPW_WISDOM)
+  IBUF(IWORD) = IOR(IBUF(IWORD), &
+    & ISHFT(IAND(ICHAR(ZLOC(JJ)), 255), 8 * IBPOS))
+ENDDO
+
+IF (C_ASSOCIATED(IPTR)) CALL C_FREE(IPTR)
+NULLIFY(ZLOC)
+END SUBROUTINE PACK_LOCAL_WISDOM
+
+
+! Unpack a packed word buffer (IBUF, ILEN_BYTES bytes) and import into
+! the local FFTW planner. FFTW wisdom is additive, so this merges the
+! incoming plans with what the local planner already knows.
+SUBROUTINE UNPACK_AND_IMPORT_WISDOM(IBUF, ILEN_BYTES, LDOK)
+INTEGER(KIND=JPIM), INTENT(IN)  :: IBUF(:)
+INTEGER(KIND=JPIM), INTENT(IN)  :: ILEN_BYTES
+LOGICAL,            INTENT(OUT) :: LDOK
+CHARACTER(KIND=C_CHAR), ALLOCATABLE, TARGET :: ZSTR(:)
+INTEGER(KIND=JPIM) :: JJ, IWORD, IBPOS, IBYTE
+INTEGER(C_INT)     :: IRET
+
+LDOK = .TRUE.
+IF (ILEN_BYTES <= 0) RETURN
+
+ALLOCATE(ZSTR(ILEN_BYTES + 1))
+DO JJ = 1, ILEN_BYTES
+  IWORD = (JJ - 1) / IBPW_WISDOM + 1
+  IBPOS = MOD(JJ - 1, IBPW_WISDOM)
+  IBYTE = IAND(ISHFT(IBUF(IWORD), -8 * IBPOS), 255)
+  ZSTR(JJ) = ACHAR(IBYTE)
+ENDDO
+ZSTR(ILEN_BYTES + 1) = C_NULL_CHAR
+
+IF (JPRB == JPRD) THEN
+  IRET = FFTW_IMPORT_WISDOM_FROM_STRING(ZSTR)
+ELSE
+  IRET = FFTWF_IMPORT_WISDOM_FROM_STRING(ZSTR)
+ENDIF
+DEALLOCATE(ZSTR)
+LDOK = (IRET == 1)
+END SUBROUTINE UNPACK_AND_IMPORT_WISDOM
+
+
+! Export FFTW wisdom to <ECTRANS_FFTW_WISDOM>.{dp,sp}.
+!
+! In MPI runs each rank only measures plans for its own set of
+! latitudes, so any single rank's wisdom is insufficient. FFTW wisdom
+! is additive (importing A then B yields the union), which lets us
+! reduce it in a butterfly tree instead of flat-gathering to one rank:
+!
+!   at step k (stride 2^k), ranks with bit k clear receive from the
+!   peer with bit k set, import the peer's wisdom into their local
+!   planner, and re-export the accumulated union upward on the next
+!   step. Ranks with bit k set send once and then drop out.
+!
+! After ceil(log2(NPROC)) steps rank 1 holds the full union in its
+! FFTW planner and writes it to disk. Per-hop message size is bounded
+! by the number of *unique* plans in the accumulated union, not by
+! sum-of-per-rank-wisdoms, so the transport does not scale with NPROC
+! and the O(NPROC) count/displacement arrays of the previous flat
+! MPL_GATHERV implementation are gone.
+SUBROUTINE EXPORT_FFTW_WISDOM
+CHARACTER(LEN=:),       ALLOCATABLE :: ZPATH
+CHARACTER(KIND=C_CHAR), ALLOCATABLE :: ZCPATH(:)
+INTEGER(KIND=JPIM), ALLOCATABLE :: IBUF_LOC(:), IBUF_RECV(:)
+INTEGER(KIND=JPIM) :: ISTAT, ILEN_LOC, IWORDS_LOC
+INTEGER(KIND=JPIM) :: IHEADER(2)
+INTEGER(KIND=JPIM) :: IR0, ISTRIDE, IPEER_R0, IPEER_1B
+INTEGER(C_INT)     :: IRET
+LOGICAL            :: LLROOT, LLMPI, LLACTIVE, LLOK
+INTEGER(KIND=JPIM), PARAMETER :: ITAG_HDR = 12341
+INTEGER(KIND=JPIM), PARAMETER :: ITAG_BUF = 12342
+
+! this does nothing if ECTRANS_FFTW_WISDOM environment variable not set
+CALL WISDOM_FILENAME(ZPATH, ISTAT)
+IF (ISTAT /= 0) RETURN
+
+LLMPI  = (MPL_NUMPROC >= 1)
+LLROOT = (.NOT. LLMPI) .OR. (MPL_RANK == 1)
+
+! Snapshot the local planner state as a packed buffer.
+CALL PACK_LOCAL_WISDOM(IBUF_LOC, IWORDS_LOC, ILEN_LOC)
+
+IF (LLMPI .AND. MPL_NUMPROC > 1) THEN
+  ! Butterfly reduce-to-root (rank 1 is the root). Ranks are 1-based
+  ! in MPL; work with the 0-based rank IR0 for the bit arithmetic.
+  IR0      = MPL_RANK - 1
+  ISTRIDE  = 1
+  LLACTIVE = .TRUE.
+  DO WHILE (ISTRIDE < MPL_NUMPROC .AND. LLACTIVE)
+    IF (MOD(IR0, 2*ISTRIDE) == 0) THEN
+      ! Receiver: pull from IR0 + ISTRIDE if that rank exists.
+      IPEER_R0 = IR0 + ISTRIDE
+      IF (IPEER_R0 < MPL_NUMPROC) THEN
+        IPEER_1B = IPEER_R0 + 1
+        CALL MPL_RECV(IHEADER, KSOURCE=IPEER_1B, KTAG=ITAG_HDR, &
+          & CDSTRING='TPM_FFTW:WISDOM_TREE:HDR')
+        IF (IHEADER(2) > 0) THEN
+          ALLOCATE(IBUF_RECV(IHEADER(2)))
+          CALL MPL_RECV(IBUF_RECV, KSOURCE=IPEER_1B, KTAG=ITAG_BUF, &
+            & CDSTRING='TPM_FFTW:WISDOM_TREE:BUF')
+          CALL UNPACK_AND_IMPORT_WISDOM(IBUF_RECV, IHEADER(1), LLOK)
+          IF (.NOT. LLOK) THEN
+            WRITE(0,'(A,I0)') &
+              & 'TPM_FFTW: WARNING failed to merge wisdom from rank ', IPEER_1B
+          ENDIF
+          DEALLOCATE(IBUF_RECV)
+          ! Re-export the (now larger) union so subsequent steps
+          ! forward the accumulated wisdom upward.
+          DEALLOCATE(IBUF_LOC)
+          CALL PACK_LOCAL_WISDOM(IBUF_LOC, IWORDS_LOC, ILEN_LOC)
+        ENDIF
+      ENDIF
+    ELSE
+      ! Sender: push to IR0 - ISTRIDE and drop out.
+      IPEER_R0 = IR0 - ISTRIDE
+      IPEER_1B = IPEER_R0 + 1
+      IHEADER(1) = ILEN_LOC
+      IHEADER(2) = IWORDS_LOC
+      CALL MPL_SEND(IHEADER, KDEST=IPEER_1B, KTAG=ITAG_HDR, &
+        & CDSTRING='TPM_FFTW:WISDOM_TREE:HDR')
+      IF (IWORDS_LOC > 0) THEN
+        CALL MPL_SEND(IBUF_LOC(1:IWORDS_LOC), KDEST=IPEER_1B, &
+          & KTAG=ITAG_BUF, CDSTRING='TPM_FFTW:WISDOM_TREE:BUF')
+      ENDIF
+      LLACTIVE = .FALSE.
+    ENDIF
+    ISTRIDE = ISTRIDE * 2
+  ENDDO
+ENDIF
+
+DEALLOCATE(IBUF_LOC)
+
+! Rank 1's planner now holds the accumulated union; write it out.
+IF (LLROOT) THEN
+  CALL STR_TO_CSTR(ZPATH, ZCPATH)
+  IF (JPRB == JPRD) THEN
+    IRET = FFTW_EXPORT_WISDOM_TO_FILENAME(ZCPATH)
+  ELSE
+    IRET = FFTWF_EXPORT_WISDOM_TO_FILENAME(ZCPATH)
+  ENDIF
+  IF (IRET == 1) THEN
+    WRITE(0,'(A,A)') 'TPM_FFTW: exported unified FFTW wisdom to ', TRIM(ZPATH)
+  ELSE
+    WRITE(0,'(A,A)') 'TPM_FFTW: WARNING failed to export FFTW wisdom to ', &
+      & TRIM(ZPATH)
+  ENDIF
+ENDIF
+
+END SUBROUTINE EXPORT_FFTW_WISDOM
+
+
 SUBROUTINE INIT_PLANS_FFTW(KDLON)
 INTEGER(KIND=JPIM),INTENT(IN) :: KDLON
+
+INTEGER(KIND=JPIM) :: INTH
+CHARACTER(LEN=4096) :: ZBUF
+INTEGER :: IELEN, IESTAT
 
 #include "abor1.intfb.h"
 
@@ -77,8 +372,59 @@ TW%N_MAX=KDLON
 ALLOCATE(TW%FFTW_PLANS(TW%N_MAX))
 ALLOCATE(TW%N_PLANS(TW%N_MAX))
 TW%N_PLANS(:)=0
-RETURN  
+
+! pre-size per-thread persistent FFT scratch registry.
+IF (.NOT. ALLOCATED(ZFFT_PERSIST_PTRS)) THEN
+  INTH = OMP_GET_MAX_THREADS()
+  IF (INTH < 1) INTH = 1
+  ALLOCATE(ZFFT_PERSIST_PTRS(INTH))
+  ALLOCATE(ZFFT_PERSIST_CAPS(INTH))
+  ZFFT_PERSIST_PTRS(:) = C_NULL_PTR
+  ZFFT_PERSIST_CAPS(:) = 0_C_SIZE_T
+ENDIF
+
+! Decide if using FFTW "measure" mode and importing/exporting wisdom
+CALL GET_ENVIRONMENT_VARIABLE('ECTRANS_FFTW_WISDOM', VALUE=ZBUF, &
+  & LENGTH=IELEN, STATUS=IESTAT)
+LUSE_MEASURE = (IESTAT == 0 .AND. IELEN > 0 .AND. IELEN <= LEN(ZBUF))
+
+! Import previous FFTW wisdom if it exists, does nothing if it doesn't exist
+CALL IMPORT_FFTW_WISDOM
+
+RETURN
 END SUBROUTINE INIT_PLANS_FFTW
+
+
+! ensure OMP thread's persistent FFTW scratch buffer is at least
+! KSIZE_COMPLEX complex elements. Grows on demand by freeing the old
+! FFTW allocation and re-allocating via FFTW_ALLOC_COMPLEX, preserving SIMD
+! alignment required by MEASURE plans
+SUBROUTINE ENSURE_FFT_BUFFER(KSIZE_COMPLEX, PTR_OUT)
+INTEGER(C_SIZE_T), INTENT(IN)  :: KSIZE_COMPLEX
+TYPE(C_PTR),       INTENT(OUT) :: PTR_OUT
+INTEGER(KIND=JPIM) :: ITID
+INTEGER(C_SIZE_T)  :: ISIZE
+
+ISIZE = MAX(KSIZE_COMPLEX, 1_C_SIZE_T)
+ITID = OMP_GET_THREAD_NUM() + 1
+
+IF (ZFFT_PERSIST_CAPS(ITID) < ISIZE) THEN
+  IF (C_ASSOCIATED(ZFFT_PERSIST_PTRS(ITID))) THEN
+    IF (JPRB == JPRD) THEN
+      CALL FFTW_FREE(ZFFT_PERSIST_PTRS(ITID))
+    ELSE
+      CALL FFTWF_FREE(ZFFT_PERSIST_PTRS(ITID))
+    END IF
+  END IF
+  IF (JPRB == JPRD) THEN
+    ZFFT_PERSIST_PTRS(ITID) = FFTW_ALLOC_COMPLEX(ISIZE)
+  ELSE
+    ZFFT_PERSIST_PTRS(ITID) = FFTWF_ALLOC_COMPLEX(ISIZE)
+  END IF
+  ZFFT_PERSIST_CAPS(ITID) = ISIZE
+END IF
+PTR_OUT = ZFFT_PERSIST_PTRS(ITID)
+END SUBROUTINE ENSURE_FFT_BUFFER
 
 
 SUBROUTINE CREATE_PLAN_FFTW(KPLAN,KTYPE,KN,KLOT)
@@ -89,6 +435,7 @@ INTEGER(KIND=JPIB) :: IPLAN
 INTEGER(KIND=JPIM) :: IRANK, ISTRIDE
 INTEGER(KIND=JPIM) :: JL
 INTEGER(KIND=JPIM) :: IRDIST,ICDIST,IN(1),IEMBED(1)
+INTEGER(C_INT)     :: IFLAG
 REAL(KIND=JPRB), POINTER :: ZDUM(:)
 TYPE(C_PTR) :: ZDUMP
 LOGICAL :: LLFOUND
@@ -151,30 +498,40 @@ IF( .NOT.LLFOUND )THEN
 !     WRITE(*,'("CREATE_PLAN_FFTW: END: DESTROYING A PLAN AT THE START OF THE LIST")')
     ENDIF
   ENDIF
+  ! Dummy buffer sized for the real plan (ICDIST*KLOT complex = IRDIST*KLOT real,
+  ! in-place). FFTW_ESTIMATE does not touch it, but next commit allows optional
+  ! use of FFTW_MEASURE, and the correct sizing must be in place from the start.
   IF (JPRB == JPRD) THEN
-     ZDUMP=FFTW_ALLOC_COMPLEX(INT(1,C_SIZE_T))
+     ZDUMP=FFTW_ALLOC_COMPLEX(INT(MAX(1_JPIM,ICDIST*KLOT),C_SIZE_T))
   ELSE
-     ZDUMP=FFTWF_ALLOC_COMPLEX(INT(1,C_SIZE_T))
+     ZDUMP=FFTWF_ALLOC_COMPLEX(INT(MAX(1_JPIM,ICDIST*KLOT),C_SIZE_T))
   END IF
-  CALL C_F_POINTER(ZDUMP,ZDUM,[2])
+  CALL C_F_POINTER(ZDUMP,ZDUM,[MAX(1_JPIM,IRDIST*KLOT)])
+  ! MEASURE (changes results baseline) when ECTRANS_FFTW_WISDOM is set, otherwise
+  ! use previous ESTIMATE+NO_SIMD path (bit-identical with previous state).
+  IF (LUSE_MEASURE) THEN
+    IFLAG = FFTW_MEASURE
+  ELSE
+    IFLAG = FFTW_ESTIMATE + FFTW_NO_SIMD
+  ENDIF
   IF( KTYPE==1 )THEN
      IF (LHOOK) CALL DR_HOOK('FFTW_PLAN_MANY_DFT_C2R',0,ZHOOK_HANDLE2)
      IF (JPRB == JPRD) THEN
         CALL DFFTW_PLAN_MANY_DFT_C2R(IPLAN,IRANK,IN,KLOT,ZDUM,IEMBED,ISTRIDE,ICDIST,&
-             & ZDUM,IEMBED,ISTRIDE,IRDIST,FFTW_ESTIMATE+FFTW_NO_SIMD)
+             & ZDUM,IEMBED,ISTRIDE,IRDIST,IFLAG)
      ELSE
         CALL SFFTW_PLAN_MANY_DFT_C2R(IPLAN,IRANK,IN,KLOT,ZDUM,IEMBED,ISTRIDE,ICDIST,&
-             & ZDUM,IEMBED,ISTRIDE,IRDIST,FFTW_ESTIMATE+FFTW_NO_SIMD)
+             & ZDUM,IEMBED,ISTRIDE,IRDIST,IFLAG)
      END IF
      IF (LHOOK) CALL DR_HOOK('FFTW_PLAN_MANY_DFT_C2R',1,ZHOOK_HANDLE2)
   ELSEIF( KTYPE==-1 )THEN
      IF (LHOOK) CALL DR_HOOK('FFTW_PLAN_MANY_DFT_R2C',0,ZHOOK_HANDLE2)
      IF (JPRB == JPRD) THEN
         CALL DFFTW_PLAN_MANY_DFT_R2C(IPLAN,IRANK,IN,KLOT,ZDUM,IEMBED,ISTRIDE,IRDIST,&
-             & ZDUM,IEMBED,ISTRIDE,ICDIST,FFTW_ESTIMATE+FFTW_NO_SIMD)
+             & ZDUM,IEMBED,ISTRIDE,ICDIST,IFLAG)
      ELSE
         CALL SFFTW_PLAN_MANY_DFT_R2C(IPLAN,IRANK,IN,KLOT,ZDUM,IEMBED,ISTRIDE,IRDIST,&
-             & ZDUM,IEMBED,ISTRIDE,ICDIST,FFTW_ESTIMATE+FFTW_NO_SIMD)       
+             & ZDUM,IEMBED,ISTRIDE,ICDIST,IFLAG)
      END IF
      IF (LHOOK) CALL DR_HOOK('FFTW_PLAN_MANY_DFT_R2C',1,ZHOOK_HANDLE2)
   ELSE
@@ -228,6 +585,7 @@ END SUBROUTINE DESTROY_PLAN_FFTW
 
 SUBROUTINE DESTROY_PLANS_FFTW
 INTEGER(KIND=JPIM) :: JL, JN
+INTEGER(KIND=JPIM) :: JT
 TYPE(FFTW_PLAN),POINTER :: CURR_FFTW_PLAN, NEXT_FFTW_PLAN
 DO JN=1,TW%N_MAX
   CURR_FFTW_PLAN=>TW%FFTW_PLANS(JN)
@@ -245,10 +603,31 @@ IF( ASSOCIATED(TW) ) THEN
   IF( ALLOCATED(TW%N_PLANS) )     DEALLOCATE(TW%N_PLANS)
   TW%N_MAX=0
 ENDIF
+
+! free per-thread persistent FFT scratch buffers. The slot arrays
+! themselves remain allocated so a later INIT_PLANS_FFTW + EXEC_FFTW cycle
+! (e.g. another resolution) can reuse the registry
+IF (ALLOCATED(ZFFT_PERSIST_PTRS)) THEN
+  DO JT = 1, SIZE(ZFFT_PERSIST_PTRS)
+    IF (C_ASSOCIATED(ZFFT_PERSIST_PTRS(JT))) THEN
+      IF (JPRB == JPRD) THEN
+        CALL FFTW_FREE(ZFFT_PERSIST_PTRS(JT))
+      ELSE
+        CALL FFTWF_FREE(ZFFT_PERSIST_PTRS(JT))
+      END IF
+      ZFFT_PERSIST_PTRS(JT) = C_NULL_PTR
+    END IF
+    ZFFT_PERSIST_CAPS(JT) = 0_C_SIZE_T
+  END DO
+END IF
+
+! export wisdom learned if ECTRANS_FFTW_WISDOM is set
+CALL EXPORT_FFTW_WISDOM
+
 RETURN
 END SUBROUTINE DESTROY_PLANS_FFTW
 
-SUBROUTINE EXEC_FFTW(KTYPE,KRLEN,KCLEN,KOFF,KFIELDS,LD_ALL,PREEL)
+SUBROUTINE EXEC_FFTW(KTYPE,KRLEN,KCLEN,KOFF,KFIELDS,LD_ALL,PREEL,KPLAN)
 
 INTEGER(KIND=JPIM),INTENT(IN)   :: KTYPE
 INTEGER(KIND=JPIM),INTENT(IN)   :: KRLEN
@@ -257,6 +636,7 @@ INTEGER(KIND=JPIM),INTENT(IN)   :: KOFF
 INTEGER(KIND=JPIM),INTENT(IN)   :: KFIELDS
 LOGICAL           ,INTENT(IN)   :: LD_ALL
 REAL(KIND=JPRB), INTENT(INOUT)  :: PREEL(:,:)
+INTEGER(KIND=JPIB),INTENT(IN), OPTIONAL :: KPLAN ! pre-resolved FFTW plan
 
 REAL(KIND=JPRB), POINTER :: ZFFT(:,:)
 REAL(KIND=JPRB), POINTER :: ZFFT1(:)
@@ -266,6 +646,7 @@ INTEGER(KIND=JPIM) :: JJ,JF
 
 INTEGER(KIND=JPIB) :: IPLAN_C2R, IPLAN_C2R1
 REAL(KIND=JPHOOK) :: ZHOOK_HANDLE, ZHOOK_HANDLE2
+REAL(KIND=JPRB) :: ZINV
 
 #include "abor1.intfb.h"
 
@@ -275,13 +656,18 @@ IF ( (KTYPE /= -1) .AND. (KTYPE /=1) ) THEN
   CALL ABOR1('TPM_FFTW:EXEC_FFTW : WRONG VALUE KTYPE')
 ENDIF
 
+! Reciprocal computed once; only used on the LUSE_MEASURE branch, where
+! the bit-id wrt previous state already lost by using FFTW_MEASURE
+ZINV = 1.0_JPRB/REAL(KRLEN,JPRB)
+
 IF( LD_ALL )THEN
-  CALL CREATE_PLAN_FFTW(IPLAN_C2R,KTYPE,KRLEN,KFIELDS)
-  IF (JPRB == JPRD) THEN
-     ZFFTP=FFTW_ALLOC_COMPLEX(INT(KCLEN/2*KFIELDS,C_SIZE_T))
+  IF (PRESENT(KPLAN)) THEN
+    IPLAN_C2R = KPLAN
   ELSE
-     ZFFTP=FFTWF_ALLOC_COMPLEX(INT(KCLEN/2*KFIELDS,C_SIZE_T))
-  END IF
+    CALL CREATE_PLAN_FFTW(IPLAN_C2R,KTYPE,KRLEN,KFIELDS)
+  ENDIF
+  ! per-thread persistent scratch (replaces FFTW_ALLOC_COMPLEX/FFTW_FREE)
+  CALL ENSURE_FFT_BUFFER(INT(KCLEN/2*KFIELDS,C_SIZE_T), ZFFTP)
   CALL C_F_POINTER(ZFFTP,ZFFT,[KCLEN,KFIELDS])
   IF (KTYPE==1) THEN
     DO JF=1,KFIELDS
@@ -314,24 +700,28 @@ IF( LD_ALL )THEN
        CALL SFFTW_EXECUTE_DFT_R2C(IPLAN_C2R,ZFFT,ZFFT)
     END IF
     IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_R2C',1,ZHOOK_HANDLE2)
-    DO JJ=1,KCLEN
-      DO JF=1,KFIELDS
-        PREEL(JF,KOFF+JJ-1)=ZFFT(JJ,JF)/REAL(KRLEN,JPRB)
+    IF (LUSE_MEASURE) THEN
+      DO JJ=1,KCLEN
+        DO JF=1,KFIELDS
+          PREEL(JF,KOFF+JJ-1)=ZFFT(JJ,JF)*ZINV
+        ENDDO
       ENDDO
-    ENDDO
+    ELSE
+      DO JJ=1,KCLEN
+        DO JF=1,KFIELDS
+          PREEL(JF,KOFF+JJ-1)=ZFFT(JJ,JF)/REAL(KRLEN,JPRB)
+        ENDDO
+      ENDDO
+    ENDIF
   ENDIF
-  IF (JPRB == JPRD) THEN
-     CALL FFTW_FREE(ZFFTP)
-  ELSE
-     CALL FFTWF_FREE(ZFFTP)
-  END IF
 ELSE
-  CALL CREATE_PLAN_FFTW(IPLAN_C2R1,KTYPE,KRLEN,1)
-  IF (JPRB == JPRD) THEN
-     ZFFT1P=FFTW_ALLOC_COMPLEX(INT(KCLEN/2,C_SIZE_T))
+  IF (PRESENT(KPLAN)) THEN
+    IPLAN_C2R1 = KPLAN
   ELSE
-     ZFFT1P=FFTWF_ALLOC_COMPLEX(INT(KCLEN/2,C_SIZE_T))
-  END IF
+    CALL CREATE_PLAN_FFTW(IPLAN_C2R1,KTYPE,KRLEN,1)
+  ENDIF
+  ! per-thread persistent scratch (replaces FFTW_ALLOC_COMPLEX/FFTW_FREE)
+  CALL ENSURE_FFT_BUFFER(INT(KCLEN/2,C_SIZE_T), ZFFT1P)
   CALL C_F_POINTER(ZFFT1P,ZFFT1,[KCLEN])
   IF (KTYPE==1) THEN
     DO JF=1,KFIELDS
@@ -361,16 +751,17 @@ ELSE
          CALL SFFTW_EXECUTE_DFT_R2C(IPLAN_C2R1,ZFFT1,ZFFT1)
       END IF
       IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_R2C',1,ZHOOK_HANDLE2)
-      DO JJ=1,KCLEN
-        PREEL(JF,KOFF+JJ-1)=ZFFT1(JJ)/REAL(KRLEN,JPRB)
-      ENDDO
+      IF (LUSE_MEASURE) THEN
+        DO JJ=1,KCLEN
+          PREEL(JF,KOFF+JJ-1)=ZFFT1(JJ)*ZINV
+        ENDDO
+      ELSE
+        DO JJ=1,KCLEN
+          PREEL(JF,KOFF+JJ-1)=ZFFT1(JJ)/REAL(KRLEN,JPRB)
+        ENDDO
+      ENDIF
     ENDDO
   ENDIF
-  IF (JPRB == JPRD) THEN
-     CALL FFTW_FREE(ZFFT1P)
-  ELSE 
-     CALL FFTWF_FREE(ZFFT1P)
-  END IF  
 ENDIF
 
 IF (LHOOK) CALL DR_HOOK('EXEC_FFTW',1,ZHOOK_HANDLE)
@@ -394,6 +785,7 @@ INTEGER(KIND=JPIM) :: JJ,JF
 
 INTEGER(KIND=JPIB) :: IPLAN_C2R, IPLAN_C2R1
 REAL(KIND=JPHOOK) :: ZHOOK_HANDLE, ZHOOK_HANDLE2
+REAL(KIND=JPRB) :: ZINV
 
 #include "abor1.intfb.h"
 
@@ -403,13 +795,12 @@ IF ( (KTYPE /= -1) .AND. (KTYPE /=1) ) THEN
   CALL ABOR1('TPM_FFTW:EXEC_EFFTW : WRONG VALUE KTYPE')
 ENDIF
 
+ZINV = 1.0_JPRB/REAL(KRLEN,JPRB)
+
 IF( LD_ALL )THEN
   CALL CREATE_PLAN_FFTW(IPLAN_C2R,KTYPE,KRLEN,KFIELDS)
-  IF  (JPRB == JPRD) THEN
-     ZFFTP=FFTW_ALLOC_COMPLEX(INT(KCLEN/2*KFIELDS,C_SIZE_T))
-  ELSE
-     ZFFTP=FFTWF_ALLOC_COMPLEX(INT(KCLEN/2*KFIELDS,C_SIZE_T))
-  END IF
+  ! per-thread persistent scratch (replaces FFTW_ALLOC_COMPLEX/FFTW_FREE)
+  CALL ENSURE_FFT_BUFFER(INT(KCLEN/2*KFIELDS,C_SIZE_T), ZFFTP)
   CALL C_F_POINTER(ZFFTP,ZFFT,[KCLEN,KFIELDS])
   IF (KTYPE==1) THEN
     DO JF=1,KFIELDS
@@ -442,24 +833,24 @@ IF( LD_ALL )THEN
        CALL SFFTW_EXECUTE_DFT_R2C(IPLAN_C2R,ZFFT,ZFFT)
     END IF
     IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_R2C',1,ZHOOK_HANDLE2)
-    DO JF=1,KFIELDS
-      DO JJ=1,KCLEN
-        PREEL(KOFF+JJ-1,JF)=ZFFT(JJ,JF)/REAL(KRLEN,JPRB)
+    IF (LUSE_MEASURE) THEN
+      DO JF=1,KFIELDS
+        DO JJ=1,KCLEN
+          PREEL(KOFF+JJ-1,JF)=ZFFT(JJ,JF)*ZINV
+        ENDDO
       ENDDO
-    ENDDO
+    ELSE
+      DO JF=1,KFIELDS
+        DO JJ=1,KCLEN
+          PREEL(KOFF+JJ-1,JF)=ZFFT(JJ,JF)/REAL(KRLEN,JPRB)
+        ENDDO
+      ENDDO
+    ENDIF
   ENDIF
-  IF (JPRB == JPRD) THEN
-     CALL FFTW_FREE(ZFFTP)
-  ELSE
-     CALL FFTWF_FREE(ZFFTP)
-  END IF 
 ELSE
   CALL CREATE_PLAN_FFTW(IPLAN_C2R1,KTYPE,KRLEN,1)
-  IF (JPRB == JPRD) THEN
-     ZFFT1P=FFTW_ALLOC_COMPLEX(INT(KCLEN/2,C_SIZE_T))
-  ELSE
-     ZFFT1P=FFTWF_ALLOC_COMPLEX(INT(KCLEN/2,C_SIZE_T))
-  END IF
+  ! per-thread persistent scratch (replaces FFTW_ALLOC_COMPLEX/FFTW_FREE)
+  CALL ENSURE_FFT_BUFFER(INT(KCLEN/2,C_SIZE_T), ZFFT1P)
   CALL C_F_POINTER(ZFFT1P,ZFFT1,[KCLEN])
   IF (KTYPE==1) THEN
     DO JF=1,KFIELDS
@@ -489,16 +880,17 @@ ELSE
          CALL SFFTW_EXECUTE_DFT_R2C(IPLAN_C2R1,ZFFT1,ZFFT1)
       END IF
       IF (LHOOK) CALL DR_HOOK('FFTW_EXECUTE_DFT_R2C',1,ZHOOK_HANDLE2)
-      DO JJ=1,KCLEN
-        PREEL(KOFF+JJ-1,JF)=ZFFT1(JJ)/REAL(KRLEN,JPRB)
-      ENDDO
+      IF (LUSE_MEASURE) THEN
+        DO JJ=1,KCLEN
+          PREEL(KOFF+JJ-1,JF)=ZFFT1(JJ)*ZINV
+        ENDDO
+      ELSE
+        DO JJ=1,KCLEN
+          PREEL(KOFF+JJ-1,JF)=ZFFT1(JJ)/REAL(KRLEN,JPRB)
+        ENDDO
+      ENDIF
     ENDDO
   ENDIF
-  IF (JPRB == JPRD) THEN
-     CALL FFTW_FREE(ZFFT1P)
-  ELSE
-     CALL FFTWF_FREE(ZFFT1P)
-  END IF
 ENDIF
 
 IF (LHOOK) CALL DR_HOOK('EXEC_EFFTW',1,ZHOOK_HANDLE)
