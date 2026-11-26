@@ -88,7 +88,8 @@ ecbuild_add_option( FEATURE FFTW
 
 ecbuild_add_option( FEATURE FFT992
                     DEFAULT OFF
-                    DESCRIPTION "Build separate FFT992 FFT implementation" )
+                    DESCRIPTION "Build separate FFT992 FFT implementation"
+                    CONDITION HAVE_CPU )
 
 if( HAVE_CPU AND NOT HAVE_FFTW AND NOT HAVE_FFT992 )
   ecbuild_critical("CPU builds require at least one Fourier backend: enable FFTW or FFT992")
