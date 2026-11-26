@@ -15,7 +15,7 @@ function(generate_file)
   set(output  ${_PAR_OUTPUT})
   set(input   ${_PAR_INPUT})
   set(backend ${_PAR_BACKEND})
-  set(sed_rules ${PROJECT_SOURCE_DIR}/src/etrans/sedrenames.txt)
+  set(sed_rules ${PROJECT_SOURCE_DIR}/src/sedrenames.txt)
 
   set( JPRB_dp JPRD )
   set( jprb_dp jprd )

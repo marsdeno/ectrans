@@ -84,6 +84,9 @@ if( HAVE_FFT992 )
       MPI 0
       OMP 1
     )
+    if( precision STREQUAL "sp" )
+      target_compile_definitions( ectrans_test_bluestein_roundtrip_${precision} PRIVATE HAVE_SP )
+    endif()
   endforeach()
 endif()
 
