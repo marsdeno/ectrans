@@ -91,6 +91,11 @@ ecbuild_add_option( FEATURE FFT992
                     DESCRIPTION "Build separate FFT992 FFT implementation"
                     CONDITION HAVE_CPU )
 
+# TODO: permit both FFT backends at build time
+if( HAVE_FFTW AND HAVE_FFT992 )
+  ecbuild_critical("Cannot enable both FFTW and FFT992 backends simultaneously")
+endif()
+
 if( HAVE_CPU AND NOT HAVE_FFTW AND NOT HAVE_FFT992 )
   ecbuild_critical("CPU builds require at least one Fourier backend: enable FFTW or FFT992")
 endif()
