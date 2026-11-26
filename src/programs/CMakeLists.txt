@@ -32,7 +32,7 @@ foreach( program ectrans-benchmark )
                                 DEFINITIONS
                                   VERSION="cpu"
                                   USE_FIELD_API=${HAVE_FIELD_API}
-        )
+                                  $<${HAVE_FFTW}:WITH_FFTW> )
         ecbuild_target_fortran_module_directory(TARGET ${program}-cpu-${prec} MODULE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/module/${program}-cpu-${prec} )
       endif()
     endforeach( prec)

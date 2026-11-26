@@ -119,7 +119,11 @@ integer(kind=jpim) :: ndgl    ! Number of latitudes
 integer(kind=jpim), allocatable :: nloen(:) ! Number of points on each latitude
 logical :: luserpnm = .false. ! Use Belusov algorithm to compute RPNM array instead of per m
 logical :: luseflt = .false. ! Use fast legendre transforms
+#ifdef WITH_FFTW
 logical :: lusefftw = .true. ! Use FFTW-compatible library for Fourier transforms
+#else
+logical :: lusefftw = .false.
+#endif
 
 ! Extra inv_trans options
 logical :: lvordiv = .false. ! Compute vorticity and divergence in grid point space
@@ -239,9 +243,11 @@ if (VERSION == "gpu") then
   lpinning = .true.
 endif
 
+
+
 ! Setup
 call get_command_line_arguments(nsmax, cgrid, iters, iters_warmup, nfld, nlev, lvordiv, lscders, &
-  &                             luvder, luseflt, lusefftw, nopt_mem_tr, nproma, npromatr, verbosity, &
+  &                             luvder, luseflt, nopt_mem_tr, nproma, npromatr, verbosity, &
   &                             ldump_values, lprint_norms, lmeminfo, nprtrv, nprtrw, ncheck, &
   &                             lpinning, lfield_api, icall_mode, ldump_checksums, iters_checksums, &
   &                             cchecksums_path, lalloperm, lpgp_on_gpu, lpsp_on_gpu)
@@ -1296,7 +1302,6 @@ subroutine print_help(unit)
   write(nout, "(a)") "    --uvders            Compute uv East-West derivatives (default off). Only&
     & when also --vordiv is given"
   write(nout, "(a)") "    --flt               Run with fast Legendre transforms (default off)"
-  write(nout, "(a)") "    --fft992            Run with FFT992 Fourier transform backend (default off)"
   write(nout, "(a)") "    --nproma NPROMA     Run with NPROMA (default no blocking: NPROMA=ngptot)"
   write(nout, "(a)") "    --npromatr NPROMATR Perform transforms in blocks of size NPROMATR rather&
     & than all at once"
@@ -1352,7 +1357,7 @@ end subroutine
 !===================================================================================================
 
 subroutine get_command_line_arguments(nsmax, cgrid, iters, iters_warmup, nfld, nlev, lvordiv, &
-  &                                   lscders, luvder, luseflt, lusefftw, nopt_mem_tr, nproma, npromatr, &
+  &                                   lscders, luvder, luseflt, nopt_mem_tr, nproma, npromatr, &
   &                                   verbosity, ldump_values, lprint_norms, lmeminfo, nprtrv, &
   &                                   nprtrw, ncheck, lpinning, lfield_api, icall_mode, ldump_checksums, &
   &                                   iters_checksums, &
@@ -1373,7 +1378,6 @@ subroutine get_command_line_arguments(nsmax, cgrid, iters, iters_warmup, nfld, n
   logical, intent(inout) :: lscders         ! Compute scalar derivatives
   logical, intent(inout) :: luvder          ! Compute uv East-West derivatives
   logical, intent(inout) :: luseflt         ! Use fast Legendre transforms
-  logical, intent(inout) :: lusefftw        ! Use FFTW-compatible library for Fourier transforms
   integer, intent(inout) :: nopt_mem_tr     ! Use of heap or stack memory for ZCOMBUF arrays in transposition arrays (0 for heap, 1 for stack)
   integer, intent(inout) :: nproma          ! NPROMA
   integer, intent(inout) :: npromatr        ! block size for field-blocking
@@ -1447,7 +1451,6 @@ subroutine get_command_line_arguments(nsmax, cgrid, iters, iters_warmup, nfld, n
       case('--scders'); lscders = .true.
       case('--uvders'); luvder = .true.
       case('--flt'); luseflt = .true.
-      case('--fft992'); lusefftw = .false.
       case('--mem-tr'); nopt_mem_tr = get_int_value('--mem-tr', iarg)
       case('--nproma'); nproma = get_int_value('--nproma', iarg)
       case('--npromatr'); npromatr = get_int_value('--npromatr', iarg)
