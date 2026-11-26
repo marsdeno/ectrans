@@ -104,7 +104,7 @@ if( NOT HAVE_MKL )
     option( FFTW_ENABLE_MKL OFF )
 endif()
 
-if( HAVE_CPU AND HAVE_FFTW )
+if( HAVE_FFTW )
   ecbuild_find_package( NAME FFTW REQUIRED COMPONENTS double single )
 endif()
 
