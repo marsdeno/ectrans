@@ -55,9 +55,9 @@ options :
         help : Enable use of MKL for BLAS and FFT calls
         cmake : ENABLE_MKL=ON
 
-    - with-fftw :
-        help : Enable use of FFTW to handle FFT calls
-        cmake : ENABLE_FFTW=ON WITH_FFTW=ON
+    - without-fftw :
+        help : Disable use of FFTW to handle FFT calls
+        cmake : ENABLE_FFTW=OFF ENABLE_FFT992=ON
 
     - with-etrans :
         help : Enable use of FFTW to handle FFT calls
