@@ -358,17 +358,9 @@ ENDIF
 
 IF(PRESENT(LDUSEFFTW)) THEN
 #ifndef WITH_FFTW
-#ifdef WITH_FFT992
   IF(LDUSEFFTW) THEN
     CALL ABORT_TRANS('SETUP_TRANS: FFTW backend requested but FFTW is not enabled in this build')
   ENDIF
-#else
-  IF(.NOT.LDUSEFFTW) THEN
-    CALL ABORT_TRANS('SETUP_TRANS: FFT992 backend requested but FFT992 is not enabled in this build')
-  ELSE
-    CALL ABORT_TRANS('SETUP_TRANS: FFTW backend requested but FFTW is not enabled in this build')
-  ENDIF
-#endif
 #endif
 ENDIF
 
