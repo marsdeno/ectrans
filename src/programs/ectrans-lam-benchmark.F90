@@ -758,17 +758,6 @@ do jstep = 1, iters+iters_warmup
 
   if (lprint_norms) then
     if( lstats ) call gstats(6,0)
-  ztstepavg = sum(ztstep(iters_warmup+1:))
-  ztstepmin = minval(ztstep(iters_warmup+1:))
-  ztstepmax = maxval(ztstep(iters_warmup+1:))
-  ztstepavg1 = sum(ztstep1(iters_warmup+1:))
-  ztstepmin1 = minval(ztstep1(iters_warmup+1:))
-  ztstepmax1 = maxval(ztstep1(iters_warmup+1:))
-  ztstepavg2 = sum(ztstep2(iters_warmup+1:))
-  ztstepmin2 = minval(ztstep2(iters_warmup+1:))
-  ztstepmax2 = maxval(ztstep2(iters_warmup+1:))
-
-
     call especnorm(pspec=zspsc2(1:1,:),         pnorm=znormsp,  kvset=ivsetsc(1:1))
     if ( lvordiv ) then
       call especnorm(pspec=zspvor(1:nflevl,:),    pnorm=znormvor, kvset=ivset(1:nflevg))
@@ -929,6 +918,20 @@ if (lprint_norms .or. ncheck > 0) then
     endif
   endif
 endif
+
+!===================================================================================================
+! Calculate timings
+!===================================================================================================
+
+ztstepavg = sum(ztstep(iters_warmup+1:))
+ztstepmin = minval(ztstep(iters_warmup+1:))
+ztstepmax = maxval(ztstep(iters_warmup+1:))
+ztstepavg1 = sum(ztstep1(iters_warmup+1:))
+ztstepmin1 = minval(ztstep1(iters_warmup+1:))
+ztstepmax1 = maxval(ztstep1(iters_warmup+1:))
+ztstepavg2 = sum(ztstep2(iters_warmup+1:))
+ztstepmin2 = minval(ztstep2(iters_warmup+1:))
+ztstepmax2 = maxval(ztstep2(iters_warmup+1:))
 
 if (luse_mpi) then
   call mpl_allreduce(ztloop,     'sum', ldreprod=.false.)
