@@ -41,7 +41,6 @@ int main ( int arc, char **argv )
   int nout = 3;
   struct Trans_t trans;
   trans_new(&trans);
-  trans.fft = TRANSI_TEST_FFT_BACKEND;
   fprintf(stderr,"trans_new done\n");
 
   read_grid(&trans);

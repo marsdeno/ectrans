@@ -36,7 +36,7 @@ void test_gptosptogp(int nlon, int nlat, int nsmax)
   //set_standard_rgg(&trans,(nlat-1)/2,nsmax);
 
 
-  trans.fft = TRANSI_TEST_FFT_BACKEND;
+  trans.fft = TRANS_FFTW;
   trans.flt = 0;
 
   TRANS_CHECK( trans_setup(&trans) );
@@ -297,3 +297,4 @@ int main ( int arc, char **argv )
 
   return 0;
 }
+

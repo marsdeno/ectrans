@@ -170,9 +170,6 @@ integer, parameter :: TRANS_MISSING_ARG      = -3
 integer, parameter :: TRANS_UNRECOGNIZED_ARG = -4
 integer, parameter :: TRANS_STALE_ARG        = -5
 
-integer(c_int), parameter :: TRANS_FFT992 = 1
-integer(c_int), parameter :: TRANS_FFTW   = 2
-
 !> @brief Interface to the Trans_t struct in transi/trans.h
 type, bind(C) :: Trans_t
 
@@ -728,7 +725,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
   integer(c_int) :: err
   character(len=MAX_STR_LEN) :: readfp, writefp
   logical :: luseflt
-  logical :: lusefftw
   BOOLEAN :: lleq_regions
   integer :: jgl
   real(c_double), pointer :: pweight(:)
@@ -816,17 +812,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
 #define LATLON_FLAGS LDLL=llatlon, LDSHIFTLL=llatlonshift,
 
-  select case (trans%fft)
-  case (TRANS_FFT992)
-    lusefftw = .False.
-  case (TRANS_FFTW)
-    lusefftw = .True.
-  case default
-    write(error_unit,'(A,I0)') 'trans_setup: ERROR: unsupported FFT backend ', trans%fft
-    iret = TRANS_UNRECOGNIZED_ARG
-    return
-  end select
-
  if( .not. llam ) then
 ! if( trans%flt > 0 .and. trans%nsmax+1 > trans%ndgl ) then
 !   write(error_unit,'(A)') "trans_setup: WARNING: A bug in trans doesn't allow to use FLT with "&
@@ -837,7 +822,7 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 ! endif
 
  luseflt = .False.
-  if( trans%flt > 0 ) luseflt = .True.
+ if( trans%flt > 0 ) luseflt = .True.
 
  if( .not. c_associated( trans%nloen ) ) then
    ! Setup that involves latlon requires no nloen
@@ -847,7 +832,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! LONLAT; Impose FLT; READ coeffs from file
        call SETUP_TRANS( LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -865,7 +849,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! LONLAT; Default FLT; READ coeffs from file
        call SETUP_TRANS( LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -884,7 +867,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! LONLAT; Impose FLT; WRITE coeffs to file
        call SETUP_TRANS( LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -902,7 +884,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! LONLAT; Impose FLT; WRITE coeffs to file
        call SETUP_TRANS( LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -921,7 +902,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! LONLAT; Impose FLT; read CACHED coefficients
        call SETUP_TRANS( LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -940,7 +920,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! LONLAT; Default FLT; read CACHED coefficients
        call SETUP_TRANS( LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -962,7 +941,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! LONLAT; Impose FLT
        call SETUP_TRANS( LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -978,7 +956,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! LONLAT; Default FLT
        call SETUP_TRANS( LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -1003,7 +980,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! REDUCEDGAUSSIANGRID; Impose FLT; READ coefficients
        call SETUP_TRANS( LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -1020,7 +996,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! REDUCEDGAUSSIANGRID; Default FLT; READ coefficients
        call SETUP_TRANS( LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -1039,7 +1014,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! REDUCEDGAUSSIANGRID; Impose FLT; WRITE coefficients
        call SETUP_TRANS(  LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -1057,7 +1031,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! REDUCEDGAUSSIANGRID; Default FLT; READ coefficients
        call SETUP_TRANS(  LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -1078,7 +1051,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! REDUCEDGAUSSIANGRID; Default FLT; read CACHED coefficients
        call SETUP_TRANS(  LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -1097,7 +1069,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! REDUCEDGAUSSIANGRID; Impose FLT; read CACHED coefficients
        call SETUP_TRANS(  LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -1118,7 +1089,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! REDUCEDGAUSSIANGRID; Impose FLT
        call SETUP_TRANS(  LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -1134,7 +1104,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
 
        ! REDUCEDGAUSSIANGRID; Default FLT
        call SETUP_TRANS(  LATLON_FLAGS &
-         & LDUSEFFTW=lusefftw, &
          & KSMAX=trans%nsmax, &
          & KRESOL=trans%handle, &
          & KDGL=trans%ndgl, &
@@ -1181,7 +1150,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
         KRESOL = trans%handle, &
         PEXWN  = trans%pexwn, &
         PEYWN  = trans%peywn, &
-        LDUSEFFTW = lusefftw, &
         LDGRIDONLY = lgridonly)
     else
       ! etrans setup with pweight
@@ -1198,7 +1166,6 @@ function trans_setup(trans) bind(C,name="trans_setup") result(iret)
         PEXWN  =  trans%pexwn, &
         PEYWN  = trans%peywn, &
         PWEIGHT = pweight, &
-        LDUSEFFTW = lusefftw, &
         LDGRIDONLY = lgridonly)
     endif
 #else

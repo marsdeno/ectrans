@@ -26,7 +26,6 @@ int main ( int argc, char **argv )
   double begin = transi_test_time();
   struct Trans_t trans;
   trans_new(&trans);
-  trans.fft = TRANSI_TEST_FFT_BACKEND;
   double start;
   int N = 80;
   int nfld = 10;

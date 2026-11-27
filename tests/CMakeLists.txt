@@ -699,17 +699,12 @@ if( HAVE_TRANSI )
   endif()
 
   find_package( CMath )
-  set( transi_fft_defs )
-  if( NOT HAVE_FFTW AND HAVE_FFT992 )
-    list( APPEND transi_fft_defs TRANSI_TEST_FFT_BACKEND=TRANS_FFT992 )
-  endif()
-
   ecbuild_add_library( TARGET ectrans_test
     SOURCES     transi/transi_test.h transi/transi_test.c
     PUBLIC_LIBS transi_dp ${CMATH_LIBRARIES}
     NOINSTALL
   )
-  target_compile_definitions( ectrans_test PUBLIC ${TEST_DEFINITIONS} ${transi_fft_defs} )
+  target_compile_definitions( ectrans_test PUBLIC ${TEST_DEFINITIONS} )
 
   if( HAVE_GPU )
     ecbuild_add_library( TARGET ectrans_test_gpu
@@ -718,7 +713,6 @@ if( HAVE_TRANSI )
       NOINSTALL
     )
     target_compile_definitions( ectrans_test PUBLIC ${TEST_DEFINITIONS} )
-    target_compile_definitions( ectrans_test_gpu PUBLIC ${transi_fft_defs} )
   endif()
 
   ecbuild_add_test( TARGET ectrans_test_transi_program
@@ -764,15 +758,6 @@ if( HAVE_TRANSI )
     LIBS      ectrans_test
     LINKER_LANGUAGE C
     ENVIRONMENT TRANS_USE_MPI=0 )
-
-  if( HAVE_FFT992 )
-    ecbuild_add_test( TARGET ectrans_test_transi_lonlat_fft992
-      SOURCES     transi/transi_test_lonlat.c
-      LIBS        ectrans_test
-      DEFINITIONS TRANSI_TEST_FFT_BACKEND=TRANS_FFT992
-      LINKER_LANGUAGE C
-      ENVIRONMENT TRANS_USE_MPI=0 )
-  endif()
 
   ecbuild_add_test( TARGET ectrans_test_transi_io
     SOURCES   transi/transi_test_io.c
