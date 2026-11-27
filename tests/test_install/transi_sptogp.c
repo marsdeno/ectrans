@@ -14,10 +14,6 @@
 
 #include "ectrans/transi.h"
 
-#ifndef TRANSI_TEST_FFT_BACKEND
-#define TRANSI_TEST_FFT_BACKEND TRANS_FFTW
-#endif
-
 #define TRANS_CHECK( CALL ) do {\
   int errcode = CALL;\
   if( errcode != TRANS_SUCCESS) {\
@@ -48,7 +44,6 @@ int main ( int arc, char **argv )
   int jfld;
   struct Trans_t trans;
   TRANS_CHECK(trans_new(&trans));
-  trans.fft = TRANSI_TEST_FFT_BACKEND;
 
   // Read resolution information
   read_grid(&trans);
@@ -167,3 +162,4 @@ void write_rgpg(struct Trans_t* trans, double* rgpg[], int nfld )
   }
   if( trans->myproc == 1 ) printf("write_rgpg ... done\n");
 }
+
